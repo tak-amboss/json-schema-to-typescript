@@ -19,12 +19,19 @@ import {
 import {log, toSafeString} from './utils'
 
 export function generate(ast: AST, options = DEFAULT_OPTIONS, parseContext?: ParseContext): string {
+  // Track declared interface names to avoid duplicates
+  const declaredInterfaceNames = new Set<string>()
+  // Share processed AST set across all declare functions
+  const processedASTs = new Set<AST>()
+
   return (
     [
       options.bannerComment,
-      parseContext ? declareCollectedGenericInterfaces(parseContext.genericInterfaceASTs, options) : '',
+      parseContext
+        ? declareCollectedGenericInterfaces(parseContext.genericInterfaceASTs, options, declaredInterfaceNames)
+        : '',
       declareNamedTypes(ast, options, ast.standaloneName!),
-      declareNamedInterfaces(ast, options, ast.standaloneName!),
+      declareNamedInterfaces(ast, options, ast.standaloneName!, processedASTs, declaredInterfaceNames),
       declareEnums(ast, options),
     ]
       .filter(Boolean)
@@ -36,20 +43,23 @@ export function generate(ast: AST, options = DEFAULT_OPTIONS, parseContext?: Par
  * Declare all generic interfaces that were collected during parsing
  * This ensures generic interfaces are emitted even if they're only referenced
  */
-function declareCollectedGenericInterfaces(genericInterfaceASTs: Map<string, TInterface>, options: Options): string {
+function declareCollectedGenericInterfaces(
+  genericInterfaceASTs: Map<string, TInterface>,
+  options: Options,
+  declaredNames: Set<string>,
+): string {
   const interfaces: string[] = []
-  const processed = new Set<TInterface>()
 
   for (const [name, interfaceAST] of genericInterfaceASTs) {
-    // Only process interfaces with standalone names
-    if (interfaceAST.standaloneName && !processed.has(interfaceAST)) {
-      processed.add(interfaceAST)
+    // Only process interfaces with standalone names that haven't been declared
+    if (interfaceAST.standaloneName && !declaredNames.has(interfaceAST.standaloneName)) {
+      declaredNames.add(interfaceAST.standaloneName)
       // Generate the standalone interface
       const generated = generateStandaloneInterface(interfaceAST as TNamedInterface, options)
       if (generated) {
         interfaces.push(generated)
       }
-      log('magenta', 'generator', `Emitting collected generic interface: ${name}`)
+      log('magenta', 'generator', `Emitted collected generic interface: ${name}`)
     }
   }
 
@@ -85,7 +95,13 @@ function declareEnums(ast: AST, options: Options, processed = new Set<AST>()): s
   }
 }
 
-function declareNamedInterfaces(ast: AST, options: Options, rootASTName: string, processed = new Set<AST>()): string {
+function declareNamedInterfaces(
+  ast: AST,
+  options: Options,
+  rootASTName: string,
+  processed = new Set<AST>(),
+  declaredNames = new Set<string>(),
+): string {
   if (processed.has(ast)) {
     return ''
   }
@@ -95,15 +111,17 @@ function declareNamedInterfaces(ast: AST, options: Options, rootASTName: string,
 
   switch (ast.type) {
     case 'ARRAY':
-      type = declareNamedInterfaces((ast as TArray).params, options, rootASTName, processed)
+      type = declareNamedInterfaces((ast as TArray).params, options, rootASTName, processed, declaredNames)
       break
     case 'INTERFACE':
       type = [
         hasStandaloneName(ast) &&
+          // Skip if already declared by declareCollectedGenericInterfaces
+          !declaredNames.has(ast.standaloneName) &&
           (ast.standaloneName === rootASTName || options.declareExternallyReferenced) &&
           generateStandaloneInterface(ast, options),
         getSuperTypesAndParams(ast)
-          .map(ast => declareNamedInterfaces(ast, options, rootASTName, processed))
+          .map(ast => declareNamedInterfaces(ast, options, rootASTName, processed, declaredNames))
           .filter(Boolean)
           .join('\n'),
       ]
@@ -114,18 +132,18 @@ function declareNamedInterfaces(ast: AST, options: Options, rootASTName: string,
     case 'TUPLE':
     case 'UNION':
       type = ast.params
-        .map(_ => declareNamedInterfaces(_, options, rootASTName, processed))
+        .map(_ => declareNamedInterfaces(_, options, rootASTName, processed, declaredNames))
         .filter(Boolean)
         .join('\n')
       if (ast.type === 'TUPLE' && ast.spreadParam) {
-        type += declareNamedInterfaces(ast.spreadParam, options, rootASTName, processed)
+        type += declareNamedInterfaces(ast.spreadParam, options, rootASTName, processed, declaredNames)
       }
       break
     case 'REFERENCE':
       // If this reference has type arguments, traverse them to declare any nested interfaces
       if ((ast as TReference).typeArguments) {
         type = (ast as TReference)
-          .typeArguments!.map((_: AST) => declareNamedInterfaces(_, options, rootASTName, processed))
+          .typeArguments!.map((_: AST) => declareNamedInterfaces(_, options, rootASTName, processed, declaredNames))
           .filter(Boolean)
           .join('\n')
       }

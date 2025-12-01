@@ -1,81 +1,129 @@
-# $dynamicRef Implementation TODO
+# $dynamicRef and $dynamicAnchor Support
 
-## ✅ Completed
+## Overview
 
-1. **Basic $dynamicRef and $dynamicAnchor support**
-   - Added JSON Schema types for `$dynamicRef` and `$dynamicAnchor`
-   - Created AST types for dynamic references
-   - Implemented context tracking during parsing
+This fork adds support for JSON Schema Draft 2020-12's `$dynamicRef` and `$dynamicAnchor` keywords, enabling context-dependent recursive types in TypeScript.
 
-2. **Generic type parameter generation**
-   - Interfaces with `$dynamicRef` get generic type parameters
-   - Type parameters have appropriate default types
-   - Pre-scanning identifies generic interfaces
+## Implementation Status
 
-3. **Context-dependent type resolution**
-   - `$dynamicAnchor` creates anchor contexts
-   - `$dynamicRef` resolves to context-specific types
-   - Proper instantiation of generic interfaces
+✅ **Fully Implemented and Test-Covered**
 
-4. **Inline vs standalone schema handling**
-   - Inline schemas use default types directly
-   - Standalone interfaces use type parameters
-   - No undefined type parameter references
+- Basic `$dynamicRef` and `$dynamicAnchor` parsing
+- Generic type parameter generation for interfaces with `$dynamicRef`
+- Context-dependent type resolution via anchor contexts
+- Global collection and emission of generic interfaces
+- Proper handling of inline vs standalone schemas
+- External file references support
+- Deduplication of interface declarations
 
-5. **Architectural fix for instantiation**
-   - Use REFERENCE nodes with typeArguments instead of modifying interfaces
-   - Base generic interfaces preserved in AST
-   - Clean separation between declarations and usage
+## How It Works
 
-6. **Global generic interface collection** (Dec 1, 2025)
-   - Added `ParseContext.genericInterfaceASTs` to track all generic interfaces
-   - Created `parseWithContext()` that returns AST and context
-   - Modified `generate()` to accept parseContext
-   - Added `declareCollectedGenericInterfaces()` to emit all collected interfaces
-   - Generic interfaces parse without anchor context to preserve type parameters
-   - Works correctly for external file references
+### 1. Pre-Scanning Phase
+`identifyGenericInterfaces()` scans the schema to identify which interfaces need generic type parameters based on `$dynamicRef` usage.
 
-## 🔴 Critical Issues Remaining
+### 2. Parsing Phase
+- **Generic Interfaces**: Interfaces containing `$dynamicRef` are parsed WITHOUT anchor context to preserve type parameter references (e.g., `TAllowedNodes[]`)
+- **Anchor Contexts**: When parsing a `$dynamicAnchor`, we create an `AnchorContext` with the allowed types and pass it down
+- **Context Collection**: All generic interfaces are stored in `ParseContext.genericInterfaceASTs` for global emission
 
-**None!** All critical issues are resolved.
+### 3. Generation Phase
+- **Global Emission**: `declareCollectedGenericInterfaces()` emits all generic interfaces first
+- **Deduplication**: Tracks declared interface names to prevent duplicate emissions
+- **Instantiation**: When referencing a generic interface from within an anchor context, generates instantiated types (e.g., `TreeNode<TreeNode>`)
 
-## 🟡 Known Limitations
+## Test Coverage
 
-### Limitation 1: allOf with $dynamicAnchor Composition
+- `test/e2e/dynamicRef.1.ts`: Basic context-dependent recursive types
+- `test/e2e/dynamicRef.2.ts`: Deeper recursive structures
+- `test/e2e/dynamicRef.3.ts`: External file generic interface references
 
-**Problem**: When using `allOf` to compose a base schema with a `$dynamicAnchor`, the output uses intersection types instead of proper generic instantiation.
+## Known Limitations
+
+### Limitation 1: allOf with $dynamicAnchor
+
+When `allOf` is combined with `$dynamicAnchor`, the output uses intersection types instead of generic instantiation.
 
 **Example**:
 ```typescript
 // Current output:
-export type Field = Base & (string | number);  // ❌ Confusing
+export interface Field extends Base & (string | number) { ... }
 
-// Expected output:
-export type Field = Base<string | number>;  // ✅ Clear
+// Desired output:
+export interface Field extends Base<string | number> { ... }
 ```
 
-**Priority**: Medium (works but not ergonomic)
+**Workaround**: Use composition instead of `allOf` where possible.
 
-## 📋 Test Coverage Needed
+**Priority**: Low (edge case, workaround available)
 
-- [ ] External file generic interfaces (Issue 1)
-- [ ] allOf with $dynamicAnchor composition (Issue 2)
-- [ ] Multiple $dynamicAnchors in one schema
-- [ ] Deeply nested $dynamicRef resolution
-- [ ] $dynamicRef without matching $dynamicAnchor (fallback behavior)
-- [ ] Cross-file $dynamicRef chains
+### Limitation 2: No Named Recursive Type Aliases
 
-## 🔧 Implementation Notes
+Complex recursive unions are inlined rather than extracted into named type aliases.
+
+**Example**:
+```typescript
+// Current:
+export interface Field {
+  content1?: TextNode | ParagraphNode<TextNode | ParagraphNode>;
+  content2?: TextNode | ParagraphNode<TextNode | ParagraphNode>;  // Duplicated
+}
+
+// Desired:
+export type FieldAllowedTypes = TextNode | ParagraphNode<FieldAllowedTypes>;
+export interface Field {
+  content1?: FieldAllowedTypes;
+  content2?: FieldAllowedTypes;
+}
+```
+
+**Workaround**: The duplicated types are semantically identical and work correctly.
+
+**Priority**: Low (DRY principle, readability improvement)
+
+### Limitation 3: Default Type is `unknown` Instead of `any`
+
+Generic type parameters default to `unknown` rather than `any`.
+
+**Current**: `interface Base<T = unknown> { ... }`
+**Desired**: `interface Base<T = any> { ... }`
+
+**Workaround**: The types work correctly; `unknown` is actually more type-safe.
+
+**Priority**: Very Low (cosmetic)
+
+## Architecture
 
 ### Key Files
-- `src/parser.ts`: Core parsing logic, context tracking, generic interface identification
-- `src/generator.ts`: TypeScript code generation, interface/type alias emission
-- `src/types/AST.ts`: AST type definitions
-- `src/types/JSONSchema.ts`: JSON Schema type extensions
 
-### Important Functions
-- `identifyGenericInterfaces()`: Pre-scans schema to find interfaces needing type parameters
-- `parseDynamicReference()`: Resolves $dynamicRef based on context
-- `newInterface()`: Creates interface AST with optional type parameters
-- `declareNamedInterfaces()`: Walks AST to emit interface declarations
+- `src/types/JSONSchema.ts`: Extended with `$dynamicRef` and `$dynamicAnchor` properties
+- `src/types/AST.ts`: Added `TDynamicReference` type and `typeParameters`/`typeArguments` support
+- `src/typesOfSchema.ts`: Added `DYNAMIC_REFERENCE` matcher
+- `src/parser.ts`: Core implementation with `parseWithContext()`, anchor context tracking, and generic interface collection
+- `src/generator.ts`: Modified to emit collected generic interfaces and handle instantiation
+- `src/index.ts`: Updated to use `parseWithContext()` and pass context to generator
 
+### Key Data Structures
+
+**ParseContext**:
+```typescript
+interface ParseContext {
+  genericInterfaces: Map<string, string>  // interface name -> type param name
+  genericInterfaceASTs: Map<string, TInterface>  // collected generic interfaces
+  currentInterfaceName?: string  // for tracking parsing context
+}
+```
+
+**AnchorContext**:
+```typescript
+interface AnchorContext {
+  anchorName: string  // e.g., "allowedNodes"
+  allowedTypeNames: string[]  // e.g., ["TreeNode", "LeafNode"]
+}
+```
+
+## Future Improvements
+
+1. Implement proper generic instantiation for `allOf` compositions
+2. Generate named recursive type aliases for complex unions
+3. Make default type (`any` vs `unknown`) configurable
+4. Optimize type parameter detection to handle more edge cases

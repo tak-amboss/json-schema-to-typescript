@@ -230,17 +230,14 @@ export function parse(
   anchorContext?: AnchorContext,
   parseContext?: ParseContext,
 ): AST {
-  // Initialize parse context on first call (for backward compatibility)
+  // For backward compatibility: if no parseContext provided, create a minimal one
+  // This happens when parse() is called directly (legacy usage without $dynamicRef support)
   if (!parseContext) {
     parseContext = {
       genericInterfaces: new Map<string, string>(),
       genericInterfaceASTs: new Map<string, TInterface>(),
     }
-
-    // Pre-scan the schema to identify all interfaces that need type parameters
-    if (!isPrimitive(schema)) {
-      identifyGenericInterfaces(getRootSchema(schema as NormalizedJSONSchema), parseContext)
-    }
+    // Don't pre-scan for backward compatibility - just create empty context
   }
 
   if (isPrimitive(schema)) {
@@ -881,7 +878,8 @@ function newInterface(
   }
 
   // Store generic interfaces in parseContext so they can be emitted even if not in AST tree
-  if (name && typeParameters && parseContext) {
+  // Only store if not already stored (to keep the first version which has proper type parameters)
+  if (name && typeParameters && parseContext && !parseContext.genericInterfaceASTs.has(name)) {
     parseContext.genericInterfaceASTs.set(name, interfaceAST)
     log('blue', 'parser', `Stored generic interface ${name} for later emission`)
   }
