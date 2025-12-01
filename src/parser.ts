@@ -392,7 +392,8 @@ function parseNonLiteral(
       const anyOfParams = schema.anyOf!.map(_ => {
         const ast = parse(_, options, undefined, processed, usedNames, newAnchorContext, parseContext)
 
-        // If we're in an anchor context and this is a named interface with generics, instantiate it
+        // If we're in an anchor context and this is a named interface with generics,
+        // return a REFERENCE with type arguments instead of modifying the interface
         if (
           newAnchorContext &&
           ast.type === 'INTERFACE' &&
@@ -406,14 +407,13 @@ function parseNonLiteral(
             type: 'REFERENCE' as const,
           }))
 
-          // Add type arguments to the interface
-          const instantiatedAST = {
-            ...ast,
+          // Return a REFERENCE to the generic interface with type arguments
+          return {
+            params: ast.standaloneName,
+            type: 'REFERENCE' as const,
             typeArguments:
               typeArguments.length === 1 ? typeArguments : [{params: typeArguments, type: 'UNION' as const}],
           }
-
-          return instantiatedAST
         }
 
         return ast
@@ -468,7 +468,9 @@ function parseNonLiteral(
         parseContext,
       )
 
-      // If we're in an anchor context and this is a generic interface, add type arguments
+      // If we're in an anchor context and this is a generic interface,
+      // return a REFERENCE with type arguments instead of modifying the interface itself
+      // This ensures the base generic interface is still declared
       if (
         newAnchorContext &&
         ast.type === 'INTERFACE' &&
@@ -486,9 +488,13 @@ function parseNonLiteral(
           type: 'REFERENCE' as const,
         }))
 
-        // Add type arguments to the interface
+        // Return a REFERENCE to the interface with type arguments
+        // The interface itself will still be declared as a standalone generic interface
         return {
-          ...ast,
+          comment: schema.description,
+          keyName,
+          params: ast.standaloneName,
+          type: 'REFERENCE',
           typeArguments: typeArguments.length === 1 ? typeArguments : [{params: typeArguments, type: 'UNION' as const}],
         }
       }
@@ -537,7 +543,8 @@ function parseNonLiteral(
           `Parsed oneOf member: type=${ast.type}, standaloneName=${(ast as any).standaloneName}, hasContext=${!!newAnchorContext}`,
         )
 
-        // If we're in an anchor context and this is a named interface with generics, instantiate it
+        // If we're in an anchor context and this is a named interface with generics,
+        // return a REFERENCE with type arguments instead of modifying the interface
         if (
           newAnchorContext &&
           ast.type === 'INTERFACE' &&
@@ -555,14 +562,13 @@ function parseNonLiteral(
             type: 'REFERENCE' as const,
           }))
 
-          // Add type arguments to the interface
-          const instantiatedAST = {
-            ...ast,
+          // Return a REFERENCE to the generic interface with type arguments
+          return {
+            params: ast.standaloneName,
+            type: 'REFERENCE' as const,
             typeArguments:
               typeArguments.length === 1 ? typeArguments : [{params: typeArguments, type: 'UNION' as const}],
           }
-
-          return instantiatedAST
         }
 
         return ast

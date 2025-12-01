@@ -11,6 +11,7 @@ import {
   TInterface,
   TIntersection,
   TNamedInterface,
+  TReference,
   TUnion,
   T_UNKNOWN,
 } from './types/AST'
@@ -73,8 +74,6 @@ function declareNamedInterfaces(ast: AST, options: Options, rootASTName: string,
     case 'INTERFACE':
       type = [
         hasStandaloneName(ast) &&
-          // Don't declare interfaces with typeArguments - they're instantiations, not declarations
-          !(ast as any).typeArguments &&
           (ast.standaloneName === rootASTName || options.declareExternallyReferenced) &&
           generateStandaloneInterface(ast, options),
         getSuperTypesAndParams(ast)
@@ -94,6 +93,15 @@ function declareNamedInterfaces(ast: AST, options: Options, rootASTName: string,
         .join('\n')
       if (ast.type === 'TUPLE' && ast.spreadParam) {
         type += declareNamedInterfaces(ast.spreadParam, options, rootASTName, processed)
+      }
+      break
+    case 'REFERENCE':
+      // If this reference has type arguments, traverse them to declare any nested interfaces
+      if ((ast as TReference).typeArguments) {
+        type = (ast as TReference)
+          .typeArguments!.map((_: AST) => declareNamedInterfaces(_, options, rootASTName, processed))
+          .filter(Boolean)
+          .join('\n')
       }
       break
     default:
@@ -167,11 +175,6 @@ function generateRawType(ast: AST, options: Options): string {
   log('magenta', 'generator', ast)
 
   if (hasStandaloneName(ast)) {
-    // Check if this is an interface with type arguments (instantiation)
-    if (ast.type === 'INTERFACE' && (ast as any).typeArguments) {
-      const typeArgs = (ast as any).typeArguments.map((_: AST) => generateType(_, options)).join(', ')
-      return `${toSafeString(ast.standaloneName)}<${typeArgs}>`
-    }
     return toSafeString(ast.standaloneName)
   }
 
