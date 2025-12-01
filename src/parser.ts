@@ -119,13 +119,7 @@ function getDynamicRefAnchorName(schema: NormalizedJSONSchema): string | null {
 /**
  * Get the default type for a $dynamicRef by finding all matching $dynamicAnchors
  */
-function getDefaultTypeForDynamicRef(
-  rootSchema: NormalizedJSONSchema,
-  anchorName: string,
-  options: Options,
-  _processed: Processed,
-  _usedNames: UsedNames,
-): AST {
+function getDefaultTypeForDynamicRef(rootSchema: NormalizedJSONSchema, anchorName: string, options: Options): AST {
   const matchingSchemas: NormalizedJSONSchema[] = []
 
   function findMatchingAnchors(s: LinkedJSONSchema) {
@@ -583,7 +577,7 @@ function parseNonLiteral(
     case 'REFERENCE':
       throw Error(format('Refs should have been resolved by the resolver!', schema))
     case 'DYNAMIC_REFERENCE':
-      return parseDynamicReference(schema, options, keyName, processed, usedNames)
+      return parseDynamicReference(schema, keyName)
     case 'STRING':
       return {
         comment: schema.description,
@@ -709,13 +703,7 @@ function parseNonLiteral(
  * Parse a $dynamicRef. This returns a reference to a type parameter that will be
  * added to the containing interface.
  */
-function parseDynamicReference(
-  schema: NormalizedJSONSchema,
-  _options: Options,
-  keyName: string | undefined,
-  _processed: Processed,
-  _usedNames: UsedNames,
-): AST {
+function parseDynamicReference(schema: NormalizedJSONSchema, keyName: string | undefined): AST {
   const dynamicRef = schema.$dynamicRef
   if (!dynamicRef) {
     throw Error('Expected $dynamicRef to be defined')
@@ -773,7 +761,7 @@ function newInterface(
     if (anchorName) {
       const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
       const rootSchema = getRootSchema(schema)
-      const defaultType = getDefaultTypeForDynamicRef(rootSchema, anchorName, options, processed, usedNames)
+      const defaultType = getDefaultTypeForDynamicRef(rootSchema, anchorName, options)
 
       typeParameters = [
         {
