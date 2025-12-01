@@ -33,6 +33,8 @@ export interface AnchorContext {
  */
 export interface ParseContext {
   genericInterfaces: Map<string, string>
+  // The current standalone interface being parsed (if any)
+  currentInterfaceName?: string
 }
 
 /**
@@ -577,7 +579,7 @@ function parseNonLiteral(
     case 'REFERENCE':
       throw Error(format('Refs should have been resolved by the resolver!', schema))
     case 'DYNAMIC_REFERENCE':
-      return parseDynamicReference(schema, keyName)
+      return parseDynamicReference(schema, keyName, options, newAnchorContext, parseContext)
     case 'STRING':
       return {
         comment: schema.description,
@@ -700,10 +702,18 @@ function parseNonLiteral(
 }
 
 /**
- * Parse a $dynamicRef. This returns a reference to a type parameter that will be
- * added to the containing interface.
+ * Parse a $dynamicRef. This returns either:
+ * - A reference to a type parameter (if in a generic standalone interface)
+ * - A union of types from the anchor context (if in a $dynamicAnchor scope)
+ * - The default type (if no generic context available)
  */
-function parseDynamicReference(schema: NormalizedJSONSchema, keyName: string | undefined): AST {
+function parseDynamicReference(
+  schema: NormalizedJSONSchema,
+  keyName: string | undefined,
+  options: Options,
+  anchorContext?: AnchorContext,
+  parseContext?: ParseContext,
+): AST {
   const dynamicRef = schema.$dynamicRef
   if (!dynamicRef) {
     throw Error('Expected $dynamicRef to be defined')
@@ -712,16 +722,52 @@ function parseDynamicReference(schema: NormalizedJSONSchema, keyName: string | u
   // Extract the anchor name from the $dynamicRef (e.g., "#allowedNodes" -> "allowedNodes")
   const anchorName = dynamicRef.replace(/^#/, '')
 
-  // Generate a type parameter name from the anchor name
-  const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
+  // If we're in an anchor context, resolve to the types from that context
+  if (anchorContext && anchorContext.anchorName === anchorName && anchorContext.allowedTypeNames.length > 0) {
+    const typeRefs: AST[] = anchorContext.allowedTypeNames.map(typeName => ({
+      params: typeName,
+      type: 'REFERENCE' as const,
+    }))
 
-  // Return a reference to the type parameter
-  // The containing interface will have this as a type parameter
+    if (typeRefs.length === 1) {
+      return {
+        comment: schema.description,
+        keyName,
+        ...typeRefs[0],
+      }
+    }
+
+    return {
+      comment: schema.description,
+      keyName,
+      params: typeRefs,
+      type: 'UNION',
+    }
+  }
+
+  // Check if we're in a generic interface
+  const isInGenericInterface =
+    parseContext?.currentInterfaceName && parseContext.genericInterfaces.has(parseContext.currentInterfaceName)
+
+  // If we're in a generic interface, use a type parameter reference
+  if (isInGenericInterface) {
+    const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
+    return {
+      comment: schema.description,
+      keyName,
+      params: typeParamName,
+      type: 'REFERENCE',
+    }
+  }
+
+  // Otherwise, use the default type
+  const rootSchema = getRootSchema(schema)
+  const defaultType = getDefaultTypeForDynamicRef(rootSchema, anchorName, options)
+
   return {
     comment: schema.description,
     keyName,
-    params: typeParamName,
-    type: 'REFERENCE',
+    ...defaultType,
   }
 }
 
@@ -754,9 +800,10 @@ function newInterface(
   const name = standaloneName(schema, keyNameFromDefinition, usedNames, options)!
 
   // Check if this interface needs a type parameter (contains $dynamicRef)
+  // Only add type parameters to standalone (named) interfaces
   let typeParameters: Array<{name: string; defaultType?: AST}> | undefined
 
-  if (schemaNeedsTypeParameter(schema)) {
+  if (name && schemaNeedsTypeParameter(schema)) {
     const anchorName = getDynamicRefAnchorName(schema)
     if (anchorName) {
       const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
@@ -774,13 +821,21 @@ function newInterface(
     }
   }
 
+  // Set the current interface name in parseContext for child parsers
+  const updatedParseContext = parseContext
+    ? {
+        ...parseContext,
+        currentInterfaceName: name,
+      }
+    : undefined
+
   return {
     comment: schema.description,
     deprecated: schema.deprecated,
     keyName,
-    params: parseSchema(schema, options, processed, usedNames, name, anchorContext, parseContext),
+    params: parseSchema(schema, options, processed, usedNames, name, anchorContext, updatedParseContext),
     standaloneName: name,
-    superTypes: parseSuperTypes(schema, options, processed, usedNames, anchorContext, parseContext),
+    superTypes: parseSuperTypes(schema, options, processed, usedNames, anchorContext, updatedParseContext),
     type: 'INTERFACE',
     typeParameters,
   }
