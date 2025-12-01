@@ -104,6 +104,9 @@ const matchers: Record<SchemaType, (schema: JSONSchema) => boolean> = {
   REFERENCE(schema) {
     return '$ref' in schema
   },
+  DYNAMIC_REFERENCE(schema) {
+    return '$dynamicRef' in schema
+  },
   STRING(schema) {
     if ('enum' in schema) {
       return false

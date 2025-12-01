@@ -73,6 +73,8 @@ function declareNamedInterfaces(ast: AST, options: Options, rootASTName: string,
     case 'INTERFACE':
       type = [
         hasStandaloneName(ast) &&
+          // Don't declare interfaces with typeArguments - they're instantiations, not declarations
+          !(ast as any).typeArguments &&
           (ast.standaloneName === rootASTName || options.declareExternallyReferenced) &&
           generateStandaloneInterface(ast, options),
         getSuperTypesAndParams(ast)
@@ -165,6 +167,11 @@ function generateRawType(ast: AST, options: Options): string {
   log('magenta', 'generator', ast)
 
   if (hasStandaloneName(ast)) {
+    // Check if this is an interface with type arguments (instantiation)
+    if (ast.type === 'INTERFACE' && (ast as any).typeArguments) {
+      const typeArgs = (ast as any).typeArguments.map((_: AST) => generateType(_, options)).join(', ')
+      return `${toSafeString(ast.standaloneName)}<${typeArgs}>`
+    }
     return toSafeString(ast.standaloneName)
   }
 
@@ -193,6 +200,10 @@ function generateRawType(ast: AST, options: Options): string {
     case 'OBJECT':
       return 'object'
     case 'REFERENCE':
+      if (ast.typeArguments && ast.typeArguments.length > 0) {
+        const typeArgs = ast.typeArguments.map(_ => generateType(_, options)).join(', ')
+        return `${ast.params}<${typeArgs}>`
+      }
       return ast.params
     case 'STRING':
       return 'string'
@@ -349,9 +360,20 @@ function generateStandaloneEnum(ast: TEnum, options: Options): string {
 }
 
 function generateStandaloneInterface(ast: TNamedInterface, options: Options): string {
+  const typeParams = ast.typeParameters
+    ? `<${ast.typeParameters
+        .map(tp => {
+          if (tp.defaultType) {
+            return `${tp.name} = ${generateType(tp.defaultType, options)}`
+          }
+          return tp.name
+        })
+        .join(', ')}>`
+    : ''
+
   return (
     (hasComment(ast) ? generateComment(ast.comment, ast.deprecated) + '\n' : '') +
-    `export interface ${toSafeString(ast.standaloneName)} ` +
+    `export interface ${toSafeString(ast.standaloneName)}${typeParams} ` +
     (ast.superTypes.length > 0
       ? `extends ${ast.superTypes.map(superType => toSafeString(superType.standaloneName)).join(', ')} `
       : '') +

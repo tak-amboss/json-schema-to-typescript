@@ -17,6 +17,7 @@ export type SchemaType =
   | 'ONE_OF'
   | 'TYPED_ARRAY'
   | 'REFERENCE'
+  | 'DYNAMIC_REFERENCE'
   | 'UNION'
   | 'UNNAMED_ENUM'
   | 'UNTYPED_ARRAY'
@@ -38,6 +39,14 @@ export interface JSONSchema extends JSONSchema4 {
    * property exists at least in https://json-schema.org/draft/2019-09/json-schema-validation.html#rfc.section.9.3
    */
   deprecated?: boolean
+  /**
+   * JSON Schema Draft 2020-12: dynamic reference to a schema with matching $dynamicAnchor
+   */
+  $dynamicRef?: string
+  /**
+   * JSON Schema Draft 2020-12: dynamic anchor for context-dependent references
+   */
+  $dynamicAnchor?: string
 }
 
 export const Parent = Symbol('Parent')

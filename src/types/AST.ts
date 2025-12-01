@@ -76,6 +76,8 @@ export interface TInterface extends AbstractAST {
   type: 'INTERFACE'
   params: TInterfaceParam[]
   superTypes: TNamedInterface[]
+  typeParameters?: TTypeParameter[]
+  typeArguments?: AST[]
 }
 
 export interface TNamedInterface extends AbstractAST {
@@ -83,6 +85,13 @@ export interface TNamedInterface extends AbstractAST {
   type: 'INTERFACE'
   params: TInterfaceParam[]
   superTypes: TNamedInterface[]
+  typeParameters?: TTypeParameter[]
+  typeArguments?: AST[]
+}
+
+export interface TTypeParameter {
+  name: string
+  defaultType?: AST
 }
 
 export interface TNever extends AbstractAST {
@@ -122,6 +131,7 @@ export interface TObject extends AbstractAST {
 export interface TReference extends AbstractAST {
   type: 'REFERENCE'
   params: string
+  typeArguments?: AST[]
 }
 
 export interface TString extends AbstractAST {
