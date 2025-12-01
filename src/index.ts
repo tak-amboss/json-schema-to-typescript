@@ -8,7 +8,7 @@ import {format} from './formatter'
 import {generate} from './generator'
 import {normalize} from './normalizer'
 import {optimize} from './optimizer'
-import {parse} from './parser'
+import {parseWithContext} from './parser'
 import {dereference} from './resolver'
 import {error, stripExtension, Try, log, parseFileAsJSONSchema} from './utils'
 import {validate} from './validator'
@@ -176,13 +176,13 @@ export async function compile(schema: JSONSchema4, name: string, options: Partia
   const normalized = normalize(linked, dereferencedPaths, name, _options)
   log('yellow', 'normalizer', time(), '✅ Result:', normalized)
 
-  const parsed = parse(normalized, _options)
+  const {ast: parsed, parseContext} = parseWithContext(normalized, _options)
   log('blue', 'parser', time(), '✅ Result:', parsed)
 
   const optimized = optimize(parsed, _options)
   log('cyan', 'optimizer', time(), '✅ Result:', optimized)
 
-  const generated = generate(optimized, _options)
+  const generated = generate(optimized, _options, parseContext)
   log('magenta', 'generator', time(), '✅ Result:', generated)
 
   const formatted = await format(generated, _options)

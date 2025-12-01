@@ -1,5 +1,6 @@
 import {memoize, omit} from 'lodash'
 import {DEFAULT_OPTIONS, Options} from './index'
+import {ParseContext} from './parser'
 import {
   AST,
   ASTWithStandaloneName,
@@ -17,10 +18,11 @@ import {
 } from './types/AST'
 import {log, toSafeString} from './utils'
 
-export function generate(ast: AST, options = DEFAULT_OPTIONS): string {
+export function generate(ast: AST, options = DEFAULT_OPTIONS, parseContext?: ParseContext): string {
   return (
     [
       options.bannerComment,
+      parseContext ? declareCollectedGenericInterfaces(parseContext.genericInterfaceASTs, options) : '',
       declareNamedTypes(ast, options, ast.standaloneName!),
       declareNamedInterfaces(ast, options, ast.standaloneName!),
       declareEnums(ast, options),
@@ -28,6 +30,30 @@ export function generate(ast: AST, options = DEFAULT_OPTIONS): string {
       .filter(Boolean)
       .join('\n\n') + '\n'
   ) // trailing newline
+}
+
+/**
+ * Declare all generic interfaces that were collected during parsing
+ * This ensures generic interfaces are emitted even if they're only referenced
+ */
+function declareCollectedGenericInterfaces(genericInterfaceASTs: Map<string, TInterface>, options: Options): string {
+  const interfaces: string[] = []
+  const processed = new Set<TInterface>()
+
+  for (const [name, interfaceAST] of genericInterfaceASTs) {
+    // Only process interfaces with standalone names
+    if (interfaceAST.standaloneName && !processed.has(interfaceAST)) {
+      processed.add(interfaceAST)
+      // Generate the standalone interface
+      const generated = generateStandaloneInterface(interfaceAST as TNamedInterface, options)
+      if (generated) {
+        interfaces.push(generated)
+      }
+      log('magenta', 'generator', `Emitting collected generic interface: ${name}`)
+    }
+  }
+
+  return interfaces.join('\n')
 }
 
 function declareEnums(ast: AST, options: Options, processed = new Set<AST>()): string {

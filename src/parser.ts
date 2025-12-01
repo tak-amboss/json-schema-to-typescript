@@ -35,6 +35,13 @@ export interface ParseContext {
   genericInterfaces: Map<string, string>
   // The current standalone interface being parsed (if any)
   currentInterfaceName?: string
+  // Collection of all generic interface ASTs that need to be declared
+  genericInterfaceASTs: Map<string, TInterface>
+}
+
+export interface ParseResult {
+  ast: AST
+  parseContext: ParseContext
 }
 
 /**
@@ -191,6 +198,29 @@ function getDefaultTypeForDynamicRef(rootSchema: NormalizedJSONSchema, anchorNam
   }
 }
 
+/**
+ * Parse a JSON Schema into an AST with context information
+ * This is the main entry point that returns both AST and parseContext
+ */
+export function parseWithContext(schema: NormalizedJSONSchema | JSONSchema4Type, options: Options): ParseResult {
+  const parseContext: ParseContext = {
+    genericInterfaces: new Map<string, string>(),
+    genericInterfaceASTs: new Map<string, TInterface>(),
+  }
+
+  // Pre-scan the schema to identify all interfaces that need type parameters
+  if (!isPrimitive(schema)) {
+    identifyGenericInterfaces(getRootSchema(schema as NormalizedJSONSchema), parseContext)
+  }
+
+  const ast = parse(schema, options, undefined, new Map(), new Set(), undefined, parseContext)
+  return {ast, parseContext}
+}
+
+/**
+ * Internal parse function (kept for backward compatibility and internal use)
+ * @deprecated Use parseWithContext for top-level parsing
+ */
 export function parse(
   schema: NormalizedJSONSchema | JSONSchema4Type,
   options: Options,
@@ -200,10 +230,11 @@ export function parse(
   anchorContext?: AnchorContext,
   parseContext?: ParseContext,
 ): AST {
-  // Initialize parse context on first call
+  // Initialize parse context on first call (for backward compatibility)
   if (!parseContext) {
     parseContext = {
       genericInterfaces: new Map<string, string>(),
+      genericInterfaceASTs: new Map<string, TInterface>(),
     }
 
     // Pre-scan the schema to identify all interfaces that need type parameters
@@ -469,8 +500,8 @@ function parseNonLiteral(
       )
 
       // If we're in an anchor context and this is a generic interface,
-      // return a REFERENCE with type arguments instead of modifying the interface itself
-      // This ensures the base generic interface is still declared
+      // return a REFERENCE with type arguments instead of the interface itself
+      // This ensures the base generic interface can be declared separately
       if (
         newAnchorContext &&
         ast.type === 'INTERFACE' &&
@@ -489,7 +520,6 @@ function parseNonLiteral(
         }))
 
         // Return a REFERENCE to the interface with type arguments
-        // The interface itself will still be declared as a standalone generic interface
         return {
           comment: schema.description,
           keyName,
@@ -835,16 +865,28 @@ function newInterface(
       }
     : undefined
 
-  return {
+  // For generic interfaces, parse WITHOUT anchor context to keep type parameter references
+  // For non-generic interfaces, use the anchor context normally
+  const contextForParsing = typeParameters ? undefined : anchorContext
+
+  const interfaceAST: TInterface = {
     comment: schema.description,
     deprecated: schema.deprecated,
     keyName,
-    params: parseSchema(schema, options, processed, usedNames, name, anchorContext, updatedParseContext),
+    params: parseSchema(schema, options, processed, usedNames, name, contextForParsing, updatedParseContext),
     standaloneName: name,
-    superTypes: parseSuperTypes(schema, options, processed, usedNames, anchorContext, updatedParseContext),
+    superTypes: parseSuperTypes(schema, options, processed, usedNames, contextForParsing, updatedParseContext),
     type: 'INTERFACE',
     typeParameters,
   }
+
+  // Store generic interfaces in parseContext so they can be emitted even if not in AST tree
+  if (name && typeParameters && parseContext) {
+    parseContext.genericInterfaceASTs.set(name, interfaceAST)
+    log('blue', 'parser', `Stored generic interface ${name} for later emission`)
+  }
+
+  return interfaceAST
 }
 
 function parseSuperTypes(
