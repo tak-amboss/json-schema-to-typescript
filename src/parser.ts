@@ -600,8 +600,6 @@ function parseNonLiteral(
             // Look for the property override that provides the concrete type
             const typeArg = extractTypeArgumentFromOverride(overrideMember, options, processed, usedNames, parseContext)
 
-            log('blue', 'parser', `Pattern 2: typeArg found=${!!typeArg}`)
-
             if (typeArg) {
               // Check if this creates a recursive union that should be a type alias
               const isRecursiveUnion =
@@ -610,19 +608,21 @@ function parseNonLiteral(
                   (p: AST) => p.type === 'REFERENCE' && parseContext?.genericInterfaces.has((p as any).params),
                 )
 
-              if (isRecursiveUnion && keyName && schema.$id) {
+              // Get parent schema name - could be from parse context or from root schema
+              const parentName = parseContext?.currentInterfaceName || (schema.$id && toSafeString(schema.$id))
+
+              if (isRecursiveUnion && keyName && parentName) {
                 // Generate type alias for the recursive union
-                const typeAliasName =
-                  toSafeString(schema.$id) + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
+                const typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
 
                 if (!parseContext.typeAliases.has(typeAliasName)) {
-                  log('blue', 'parser', `Creating recursive type alias: ${typeAliasName}`)
+                  log('blue', 'parser', `Creating recursive type alias for allOf pattern: ${typeAliasName}`)
 
                   const typeAlias: TTypeAlias = {
                     type: 'TYPE_ALIAS',
                     standaloneName: typeAliasName,
                     params: typeArg,
-                    comment: `Recursive type for ${schema.$id}.${keyName}`,
+                    comment: `Recursive type for ${parentName}.${keyName}`,
                   }
 
                   parseContext.typeAliases.set(typeAliasName, typeAlias)
