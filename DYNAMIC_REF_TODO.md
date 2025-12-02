@@ -1,8 +1,10 @@
-# $dynamicRef and $dynamicAnchor Support
+# Generic Types and Recursive Structures
 
 ## Overview
 
-This fork adds support for JSON Schema Draft 2020-12's `$dynamicRef` and `$dynamicAnchor` keywords, enabling context-dependent recursive types in TypeScript.
+This fork adds comprehensive support for context-dependent recursive types in TypeScript, including:
+- JSON Schema Draft 2020-12's `$dynamicRef` and `$dynamicAnchor` keywords
+- Framework-generated `allOf` patterns with empty items schemas (e.g., Lexical, Slate)
 
 ## Implementation Status
 
@@ -18,17 +20,23 @@ This fork adds support for JSON Schema Draft 2020-12's `$dynamicRef` and `$dynam
 - **Self-referential generic parameter usage** (Issue #2 - Dec 2, 2025)
 - **Generic instantiation for `allOf` patterns** (Issue #4 - Dec 2, 2025)
 - **Recursive type aliases for complex unions** (Issue #3 - Dec 2, 2025)
+- **allOf pattern with empty items schemas** (Dec 2, 2025)
+- **Recursive type aliases for allOf patterns** (Dec 2, 2025)
 
 ## How It Works
 
 ### 1. Pre-Scanning Phase
-`identifyGenericInterfaces()` scans the schema to identify which interfaces need generic type parameters based on `$dynamicRef` usage.
+`identifyGenericInterfaces()` scans the schema to identify which interfaces need generic type parameters based on:
+- `$dynamicRef` usage
+- Empty items schemas (`items: {}`)
 
 ### 2. Parsing Phase
-- **Generic Interfaces**: Interfaces containing `$dynamicRef` are parsed with self-referential anchor context to use type parameters (e.g., `TAllowedNodes[]`)
+- **Generic Interfaces**: Interfaces containing `$dynamicRef` or empty items are parsed with appropriate type parameters
 - **Anchor Contexts**: When parsing a `$dynamicAnchor`, we create an `AnchorContext` with the allowed types and pass it down
+- **Empty Items Handling**: Properties with `items: {}` are replaced with the type parameter (e.g., `T[]`)
+- **allOf Pattern Detection**: Detect base + override pattern where base has empty items and override provides concrete types
 - **Context Collection**: All generic interfaces are stored in `ParseContext.genericInterfaceASTs` for global emission
-- **Recursive Type Aliases**: Properties with `$dynamicAnchor` + `oneOf`/`anyOf` generate type aliases stored in `ParseContext.typeAliases`
+- **Recursive Type Aliases**: Properties with recursive unions (both `$dynamicAnchor` and `allOf` patterns) generate type aliases stored in `ParseContext.typeAliases`
 
 ### 3. Generation Phase
 - **Type Alias Emission**: `declareTypeAliases()` emits recursive type aliases first (replaces generic instantiations with self-references)
@@ -38,12 +46,17 @@ This fork adds support for JSON Schema Draft 2020-12's `$dynamicRef` and `$dynam
 
 ## Test Coverage
 
+### $dynamicRef Pattern
 - `test/e2e/dynamicRef.1.ts`: Basic context-dependent recursive types
 - `test/e2e/dynamicRef.2.ts`: Deeper recursive structures
 - `test/e2e/dynamicRef.3.ts`: External file generic interface references
 - `test/e2e/dynamicRef.4.ts`: Self-referential generic parameter usage (Issue #2)
-- `test/e2e/dynamicRef.5.ts`: Recursive unions without type aliases (Issue #3)
-- `test/e2e/dynamicRef.6.ts`: `allOf` generic instantiation pattern (Issue #4)
+- `test/e2e/dynamicRef.5.ts`: Recursive unions with type aliases (Issue #3)
+- `test/e2e/dynamicRef.6.ts`: `allOf` with `$dynamicAnchor` (Issue #4)
+
+### allOf Pattern (Framework-Generated Schemas)
+- `test/e2e/allOfGeneric.1.ts`: Simple allOf with empty items
+- `test/e2e/allOfGeneric.2.ts`: Recursive allOf with type aliases
 
 ## Recently Resolved Issues (Dec 2, 2025)
 
@@ -107,6 +120,57 @@ export interface Issue3Test {
 - Better readability and DRY principle
 - Improved IDE autocomplete for nested structures
 - Reusable type definitions
+
+### ✅ allOf Pattern with Empty Items (Framework Support)
+
+**Fixed**: Support for framework-generated schemas (Lexical, Slate, etc.) that use `allOf` to combine base types with field-specific constraints.
+
+**Pattern**: Base types have `items: {}` (empty schema), fields use `allOf` to override with concrete types.
+
+**Example**:
+```typescript
+// Input Schema:
+// Container: { properties: { items: { type: "array", items: {} } } }
+// Field: { allOf: [{ $ref: Container }, { properties: { items: { items: { oneOf: [...] } } } }] }
+
+// Before:
+export interface Container { items?: unknown[]; }
+export interface Field { field?: Container & { items?: (string | number)[]; }; }
+
+// After:
+export interface Container<T = unknown> { items?: T[]; }
+export interface Field { field?: Container<string | number>; }
+```
+
+**Recursive Example**:
+```typescript
+// Before:
+export interface Root { children: unknown[]; }
+export interface Field { richText?: Root & { children?: (Text | (Paragraph & {...}))[]; }; }
+
+// After:
+export type FieldRichText = Text | Paragraph<FieldRichText>;
+export interface Root<T = unknown> { children: T[]; }
+export interface Paragraph<T = unknown> { children: T[]; }
+export interface Field { richText?: Root<FieldRichText>; }
+```
+
+**Solution**:
+1. Extended `schemaNeedsTypeParameter()` to detect `items: {}`
+2. Extended `identifyGenericInterfaces()` to mark these interfaces as generic
+3. Added `hasEmptyItemsSchema()` helper function
+4. Modified `newInterface()` to add `<T = unknown>` for empty items
+5. Modified `parseSchema()` to replace empty items with type parameter
+6. Extended ALL_OF case to detect base + override pattern (after dereferencing)
+7. Added `extractTypeArgumentFromOverride()` to extract concrete type from override
+8. Added recursive type alias generation for allOf patterns
+
+**Benefits**:
+- Framework compatibility (Lexical, Slate, etc.)
+- Clean generic instantiation instead of messy intersections
+- Recursive type aliases for deep structures
+- Feature parity with `$dynamicRef` pattern
+- No post-processing needed
 
 ## Known Limitations
 
