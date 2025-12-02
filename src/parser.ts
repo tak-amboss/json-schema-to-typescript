@@ -397,17 +397,60 @@ function parseNonLiteral(
   const keyNameFromDefinition = findKey(definitions, _ => _ === schema)
 
   switch (type) {
-    case 'ALL_OF':
+    case 'ALL_OF': {
+      // Check if one of the allOf members has a $dynamicAnchor
+      const anchorMember = schema.allOf!.find((member: any) => member.$dynamicAnchor && (member.oneOf || member.anyOf))
+
+      // If we have an anchor member, parse others without the anchor context,
+      // then create a generic instantiation
+      if (anchorMember && schema.allOf!.length === 2) {
+        // Find the non-anchor member (could be $ref or the actual schema)
+        const baseMember = schema.allOf!.find((m: any) => m !== anchorMember)
+
+        if (baseMember) {
+          // Parse the base member without anchor context to get the base interface
+          const baseAST = parse(baseMember, options, undefined, processed, usedNames, undefined, parseContext)
+
+          // Parse the anchor member to get the type union
+          const typeArgAST = parse(anchorMember, options, undefined, processed, usedNames, undefined, parseContext)
+
+          // Get the interface name from either standaloneName or params (for REFERENCE nodes)
+          const interfaceName =
+            baseAST.standaloneName || (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
+
+          // If the base is a generic interface, create instantiation
+          if (
+            interfaceName &&
+            typeof interfaceName === 'string' &&
+            parseContext?.genericInterfaces.has(interfaceName)
+          ) {
+            return {
+              comment: schema.description,
+              deprecated: schema.deprecated,
+              keyName,
+              standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
+              params: interfaceName,
+              type: 'REFERENCE',
+              typeArguments: [typeArgAST],
+            }
+          }
+        }
+      }
+
+      // Default: parse all members with anchor context and create intersection
+      const members = schema.allOf!.map(_ =>
+        parse(_, options, undefined, processed, usedNames, newAnchorContext, parseContext),
+      )
+
       return {
         comment: schema.description,
         deprecated: schema.deprecated,
         keyName,
         standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
-        params: schema.allOf!.map(_ =>
-          parse(_, options, undefined, processed, usedNames, newAnchorContext, parseContext),
-        ),
+        params: members,
         type: 'INTERSECTION',
       }
+    }
     case 'ANY':
       return {
         ...(options.unknownAny ? T_UNKNOWN : T_ANY),
@@ -862,9 +905,19 @@ function newInterface(
       }
     : undefined
 
-  // For generic interfaces, parse WITHOUT anchor context to keep type parameter references
-  // For non-generic interfaces, use the anchor context normally
-  const contextForParsing = typeParameters ? undefined : anchorContext
+  // For generic interfaces, create a self-referential anchor context
+  // This allows $dynamicRef to resolve to the type parameter
+  let contextForParsing = anchorContext
+  if (typeParameters && schema.$dynamicAnchor) {
+    const typeParamName = typeParameters[0].name
+    contextForParsing = {
+      anchorName: schema.$dynamicAnchor,
+      allowedTypeNames: [typeParamName],
+    }
+  } else if (typeParameters) {
+    // Generic interface without $dynamicAnchor - no context
+    contextForParsing = undefined
+  }
 
   const interfaceAST: TInterface = {
     comment: schema.description,
