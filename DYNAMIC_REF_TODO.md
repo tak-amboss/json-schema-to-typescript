@@ -226,14 +226,22 @@ interface TTypeAlias {
 }
 ```
 
-## Future Improvements
+## Recent Enhancements
 
 1. ✅ ~~Implement proper generic instantiation for `allOf` compositions~~ (Completed Dec 2, 2025)
 2. ✅ ~~Self-referential generic parameter usage~~ (Completed Dec 2, 2025)
 3. ✅ ~~Generate named recursive type aliases for complex unions~~ (Completed Dec 2, 2025)
-4. Make default type (`any` vs `unknown`) configurable
-5. Optimize type parameter detection to handle more edge cases
-6. Support for multiple `$dynamicAnchor` names in a single schema
+4. ✅ ~~Recursive type aliases for nested `$dynamicAnchor` patterns~~ (Completed Dec 2, 2025)
+   - Field-specific type aliases (e.g., `FeatureRequestBasicTextChildren`)
+   - Pre-collection of anchor contexts before dereferencing
+   - Instantiation of generic base types with field-specific aliases
+   - Deep recursive schema detection with cycle protection
+
+## Future Improvements
+
+1. Make default type (`any` vs `unknown`) configurable
+2. Optimize type parameter detection to handle more edge cases
+3. Support for multiple `$dynamicAnchor` names in a single schema
 
 ## Post-Processing No Longer Needed
 
