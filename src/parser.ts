@@ -3,7 +3,16 @@ import {findKey, includes, isPlainObject, map, memoize, omit} from 'lodash'
 import {format} from 'util'
 import {Options} from './'
 import {applySchemaTyping} from './applySchemaTyping'
-import type {AST, TInterface, TInterfaceParam, TIntersection, TNamedInterface, TTypeAlias, TTuple} from './types/AST'
+import type {
+  AST,
+  TInterface,
+  TInterfaceParam,
+  TIntersection,
+  TNamedInterface,
+  TTypeAlias,
+  TTuple,
+  TUnion,
+} from './types/AST'
 import {T_ANY, T_ANY_ADDITIONAL_PROPERTIES, T_UNKNOWN, T_UNKNOWN_ADDITIONAL_PROPERTIES} from './types/AST'
 import type {
   EnumJSONSchema,
@@ -61,33 +70,55 @@ function identifyGenericInterfaces(rootSchema: NormalizedJSONSchema, parseContex
     }
   })
 
-  // Only process if there are dynamic refs
-  if (dynamicRefs.size === 0) {
-    return
+  // Process dynamic refs if they exist
+  if (dynamicRefs.size > 0) {
+    // For each unique anchor name, find interfaces that contain $dynamicRef to that anchor
+    for (const anchorName of dynamicRefs) {
+      const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
+
+      // Find all interfaces that contain this $dynamicRef
+      traverse(rootSchema, (s: LinkedJSONSchema) => {
+        const normalized = s as NormalizedJSONSchema
+        if (normalized.$id && schemaNeedsTypeParameter(normalized)) {
+          const interfaceName = toSafeString(normalized.$id)
+          if (!parseContext.genericInterfaces.has(interfaceName)) {
+            parseContext.genericInterfaces.set(interfaceName, typeParamName)
+            log(
+              'blue',
+              'parser',
+              `Pre-identified generic interface ${interfaceName} with type parameter ${typeParamName}`,
+            )
+          }
+        }
+      })
+    }
   }
 
-  // For each unique anchor name, find interfaces that contain $dynamicRef to that anchor
-  for (const anchorName of dynamicRefs) {
-    const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
-
-    // Find all interfaces that contain this $dynamicRef
-    traverse(rootSchema, (s: LinkedJSONSchema) => {
-      const normalized = s as NormalizedJSONSchema
-      if (normalized.$id && schemaNeedsTypeParameter(normalized)) {
-        const interfaceName = toSafeString(normalized.$id)
+  // Also identify interfaces with empty items schemas (allOf pattern)
+  traverse(rootSchema, (s: LinkedJSONSchema) => {
+    const normalized = s as NormalizedJSONSchema
+    if (normalized.$id && hasEmptyItemsSchema(normalized)) {
+      const interfaceName = toSafeString(normalized.$id)
+      if (!parseContext.genericInterfaces.has(interfaceName)) {
+        const typeParamName = 'T'
         parseContext.genericInterfaces.set(interfaceName, typeParamName)
-        log('blue', 'parser', `Pre-identified generic interface ${interfaceName} with type parameter ${typeParamName}`)
+        log(
+          'blue',
+          'parser',
+          `Pre-identified generic interface ${interfaceName} (empty items) with type parameter ${typeParamName}`,
+        )
       }
-    })
-  }
+    }
+  })
 }
 
 /**
  * Check if a schema directly contains a $dynamicRef in its properties
+ * OR has empty items schema (items: {}) which should be generic
  * (not in nested schemas)
  */
 function schemaNeedsTypeParameter(schema: NormalizedJSONSchema): boolean {
-  // Check if any direct property contains $dynamicRef
+  // Check if any direct property contains $dynamicRef or empty items
   if (schema.properties) {
     for (const prop of Object.values(schema.properties)) {
       if (prop && typeof prop === 'object') {
@@ -102,12 +133,103 @@ function schemaNeedsTypeParameter(schema: NormalizedJSONSchema): boolean {
             if ((items as NormalizedJSONSchema).$dynamicRef) {
               return true
             }
+            // Check for empty items schema: items: {}
+            // This means the array item type should be generic
+            if (
+              Object.keys(items).length === 0 ||
+              (Object.keys(items).length === 1 && 'type' in items && !items.type)
+            ) {
+              return true
+            }
           }
         }
       }
     }
   }
   return false
+}
+
+/**
+ * Check if a schema has properties with empty items schemas (items: {})
+ * This indicates the type should be generic
+ */
+function hasEmptyItemsSchema(schema: NormalizedJSONSchema): boolean {
+  if (schema.properties) {
+    for (const prop of Object.values(schema.properties)) {
+      if (prop && typeof prop === 'object') {
+        const propSchema = prop as NormalizedJSONSchema
+        // Check if it's an array with empty items
+        if (propSchema.type === 'array' && propSchema.items) {
+          const items = propSchema.items
+          if (!Array.isArray(items) && typeof items === 'object') {
+            // Empty schema: {} or {type: undefined}
+            if (
+              Object.keys(items).length === 0 ||
+              (Object.keys(items).length === 1 && 'type' in items && !items.type)
+            ) {
+              return true
+            }
+          }
+        }
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Extract type argument from allOf override member
+ * Looks for properties.X.items.items.oneOf or similar patterns
+ */
+function extractTypeArgumentFromOverride(
+  overrideMember: any,
+  options: Options,
+  processed: Processed,
+  usedNames: UsedNames,
+  parseContext?: ParseContext,
+): AST | null {
+  if (!overrideMember.properties) {
+    return null
+  }
+
+  // Find the first array property with concrete items
+  for (const prop of Object.values(overrideMember.properties)) {
+    if (prop && typeof prop === 'object') {
+      const propSchema = prop as NormalizedJSONSchema
+      // Look for array with items
+      if (propSchema.type === 'array' && propSchema.items) {
+        const items = propSchema.items
+        if (!Array.isArray(items) && typeof items === 'object') {
+          // Check if items has concrete type (oneOf, anyOf, type, $ref)
+          if ((items as NormalizedJSONSchema).oneOf || (items as NormalizedJSONSchema).anyOf) {
+            // Parse this as the type argument
+            return parse(
+              items as NormalizedJSONSchema,
+              options,
+              undefined,
+              processed,
+              usedNames,
+              undefined,
+              parseContext,
+            )
+          }
+          if ((items as NormalizedJSONSchema).type || (items as NormalizedJSONSchema).$ref) {
+            return parse(
+              items as NormalizedJSONSchema,
+              options,
+              undefined,
+              processed,
+              usedNames,
+              undefined,
+              parseContext,
+            )
+          }
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 /**
@@ -402,7 +524,7 @@ function parseNonLiteral(
 
   switch (type) {
     case 'ALL_OF': {
-      // Check if one of the allOf members has a $dynamicAnchor
+      // Pattern 1: Check if one of the allOf members has a $dynamicAnchor
       const anchorMember = schema.allOf!.find((member: any) => member.$dynamicAnchor && (member.oneOf || member.anyOf))
 
       // If we have an anchor member, parse others without the anchor context,
@@ -436,6 +558,103 @@ function parseNonLiteral(
               params: interfaceName,
               type: 'REFERENCE',
               typeArguments: [typeArgAST],
+            }
+          }
+        }
+      }
+
+      // Pattern 2: Check for allOf with base (has empty items) + override pattern
+      // By this point, $ref may be dereferenced, so we check for:
+      // - One member with empty items (the base)
+      // - One member with concrete items (the override)
+      if (schema.allOf!.length === 2) {
+        const baseMember = schema.allOf!.find((m: any) => hasEmptyItemsSchema(m as NormalizedJSONSchema))
+        const overrideMember = schema.allOf!.find((m: any) => m !== baseMember && m.properties)
+
+        log(
+          'blue',
+          'parser',
+          `Pattern 2: baseMember=${!!baseMember}, overrideMember=${!!overrideMember}, baseName=${baseMember && (baseMember as any).$id}`,
+        )
+
+        if (baseMember && overrideMember) {
+          // Parse the base to get the interface
+          const baseAST = parse(baseMember, options, undefined, processed, usedNames, undefined, parseContext)
+
+          // Get the interface name
+          const interfaceName =
+            baseAST.standaloneName || (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
+
+          log(
+            'blue',
+            'parser',
+            `Pattern 2: interfaceName=${interfaceName}, isGeneric=${parseContext?.genericInterfaces.has(interfaceName as string)}`,
+          )
+
+          // Check if this is a generic interface (has empty items)
+          if (
+            interfaceName &&
+            typeof interfaceName === 'string' &&
+            parseContext?.genericInterfaces.has(interfaceName)
+          ) {
+            // Look for the property override that provides the concrete type
+            const typeArg = extractTypeArgumentFromOverride(overrideMember, options, processed, usedNames, parseContext)
+
+            log('blue', 'parser', `Pattern 2: typeArg found=${!!typeArg}`)
+
+            if (typeArg) {
+              // Check if this creates a recursive union that should be a type alias
+              const isRecursiveUnion =
+                typeArg.type === 'UNION' &&
+                (typeArg as TUnion).params.some(
+                  (p: AST) => p.type === 'REFERENCE' && parseContext?.genericInterfaces.has((p as any).params),
+                )
+
+              if (isRecursiveUnion && keyName && schema.$id) {
+                // Generate type alias for the recursive union
+                const typeAliasName =
+                  toSafeString(schema.$id) + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
+
+                if (!parseContext.typeAliases.has(typeAliasName)) {
+                  log('blue', 'parser', `Creating recursive type alias: ${typeAliasName}`)
+
+                  const typeAlias: TTypeAlias = {
+                    type: 'TYPE_ALIAS',
+                    standaloneName: typeAliasName,
+                    params: typeArg,
+                    comment: `Recursive type for ${schema.$id}.${keyName}`,
+                  }
+
+                  parseContext.typeAliases.set(typeAliasName, typeAlias)
+
+                  // Return reference with type alias instead of direct typeArg
+                  return {
+                    comment: schema.description,
+                    deprecated: schema.deprecated,
+                    keyName,
+                    standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
+                    params: interfaceName,
+                    type: 'REFERENCE',
+                    typeArguments: [
+                      {
+                        type: 'REFERENCE',
+                        params: typeAliasName,
+                      },
+                    ],
+                  }
+                }
+              }
+
+              log('blue', 'parser', `Creating generic instantiation: ${interfaceName}<...>`)
+              return {
+                comment: schema.description,
+                deprecated: schema.deprecated,
+                keyName,
+                standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
+                params: interfaceName,
+                type: 'REFERENCE',
+                typeArguments: [typeArg],
+              }
             }
           }
         }
@@ -886,6 +1105,7 @@ function newInterface(
   if (name && schemaNeedsTypeParameter(schema)) {
     const anchorName = getDynamicRefAnchorName(schema)
     if (anchorName) {
+      // $dynamicRef pattern
       const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
       const rootSchema = getRootSchema(schema)
       const defaultType = getDefaultTypeForDynamicRef(rootSchema, anchorName, options)
@@ -898,6 +1118,19 @@ function newInterface(
       ]
 
       log('blue', 'parser', `Adding type parameter ${typeParamName} to interface ${name}`)
+    } else if (hasEmptyItemsSchema(schema)) {
+      // Empty items pattern: items: {}
+      const typeParamName = 'T'
+      const defaultType = options.unknownAny ? T_UNKNOWN : T_ANY
+
+      typeParameters = [
+        {
+          name: typeParamName,
+          defaultType,
+        },
+      ]
+
+      log('blue', 'parser', `Adding type parameter ${typeParamName} to interface ${name} (empty items)`)
     }
   }
 
@@ -977,6 +1210,31 @@ function parseSchema(
 ): TInterfaceParam[] {
   let asts: TInterfaceParam[] = map(schema.properties, (value, key: string) => {
     let ast = parse(value, options, key, processed, usedNames, anchorContext, parseContext)
+
+    // Check if we're in a generic interface and this property has empty items
+    // If so, replace the array items with the type parameter
+    if (
+      parseContext?.currentInterfaceName &&
+      parseContext.genericInterfaces.has(parseContext.currentInterfaceName) &&
+      value.type === 'array' &&
+      value.items &&
+      typeof value.items === 'object' &&
+      !Array.isArray(value.items) &&
+      (Object.keys(value.items).length === 0 ||
+        (Object.keys(value.items).length === 1 && 'type' in value.items && !value.items.type))
+    ) {
+      const typeParamName = parseContext.genericInterfaces.get(parseContext.currentInterfaceName)!
+      ast = {
+        comment: value.description,
+        keyName: key,
+        params: {
+          params: typeParamName,
+          type: 'REFERENCE',
+        },
+        type: 'ARRAY',
+      }
+      log('blue', 'parser', `Replaced empty items with type parameter ${typeParamName} for ${key}`)
+    }
 
     // Check if this property defines a $dynamicAnchor with oneOf/anyOf (recursive union pattern)
     const hasRecursivePattern = value.$dynamicAnchor && (value.oneOf || value.anyOf) && parentSchemaName && parseContext
