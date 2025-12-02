@@ -13,6 +13,8 @@ import {
   TIntersection,
   TNamedInterface,
   TReference,
+  TTuple,
+  TTypeAlias,
   TUnion,
   T_UNKNOWN,
 } from './types/AST'
@@ -27,6 +29,7 @@ export function generate(ast: AST, options = DEFAULT_OPTIONS, parseContext?: Par
   return (
     [
       options.bannerComment,
+      parseContext ? declareTypeAliases(parseContext.typeAliases, options) : '',
       parseContext
         ? declareCollectedGenericInterfaces(parseContext.genericInterfaceASTs, options, declaredInterfaceNames)
         : '',
@@ -37,6 +40,55 @@ export function generate(ast: AST, options = DEFAULT_OPTIONS, parseContext?: Par
       .filter(Boolean)
       .join('\n\n') + '\n'
   ) // trailing newline
+}
+
+/**
+ * Declare all type aliases for recursive unions
+ */
+function declareTypeAliases(typeAliases: Map<string, TTypeAlias>, options: Options): string {
+  const aliases: string[] = []
+
+  for (const [name, typeAlias] of typeAliases) {
+    // Replace generic instantiations with self-references
+    const typeString = generateRecursiveTypeAlias(typeAlias, name, options)
+    aliases.push(typeString)
+    log('magenta', 'generator', `Emitted type alias: ${name}`)
+  }
+
+  return aliases.join('\n')
+}
+
+/**
+ * Generate a recursive type alias, replacing generic instantiations with self-references
+ */
+function generateRecursiveTypeAlias(typeAlias: TTypeAlias, aliasName: string, options: Options): string {
+  const comment = hasComment(typeAlias) ? generateComment(typeAlias.comment, typeAlias.deprecated) + '\n' : ''
+
+  // Generate the type, replacing generic instantiations with self-references
+  const typeString = generateRecursiveType(typeAlias.params, aliasName, options)
+
+  return `${comment}export type ${aliasName} = ${typeString}`
+}
+
+/**
+ * Generate type string, replacing generic instantiations with self-references
+ */
+function generateRecursiveType(ast: AST, aliasName: string, options: Options): string {
+  if (ast.type === 'UNION') {
+    return ast.params
+      .map((p: AST) => {
+        // If this is a reference to a generic interface with type arguments,
+        // replace it with a self-referential version
+        if (p.type === 'REFERENCE' && (p as TReference).typeArguments) {
+          const ref = p as TReference
+          return `${ref.params}<${aliasName}>`
+        }
+        return generateType(p, options)
+      })
+      .join(' | ')
+  }
+
+  return generateType(ast, options)
 }
 
 /**
@@ -222,22 +274,22 @@ function generateRawType(ast: AST, options: Options): string {
     return toSafeString(ast.standaloneName)
   }
 
-  switch (ast.type) {
+  switch (ast.type as AST['type']) {
     case 'ANY':
       return 'any'
     case 'ARRAY':
       return (() => {
-        const type = generateType(ast.params, options)
+        const type = generateType((ast as TArray).params, options)
         return type.endsWith('"') ? '(' + type + ')[]' : type + '[]'
       })()
     case 'BOOLEAN':
       return 'boolean'
     case 'INTERFACE':
-      return generateInterface(ast, options)
+      return generateInterface(ast as TInterface, options)
     case 'INTERSECTION':
-      return generateSetOperation(ast, options)
+      return generateSetOperation(ast as TIntersection, options)
     case 'LITERAL':
-      return JSON.stringify(ast.params)
+      return JSON.stringify((ast as any).params)
     case 'NEVER':
       return 'never'
     case 'NUMBER':
@@ -247,28 +299,29 @@ function generateRawType(ast: AST, options: Options): string {
     case 'OBJECT':
       return 'object'
     case 'REFERENCE':
-      if (ast.typeArguments && ast.typeArguments.length > 0) {
-        const typeArgs = ast.typeArguments.map(_ => generateType(_, options)).join(', ')
-        return `${ast.params}<${typeArgs}>`
+      if ((ast as TReference).typeArguments && (ast as TReference).typeArguments!.length > 0) {
+        const typeArgs = (ast as TReference).typeArguments!.map(_ => generateType(_, options)).join(', ')
+        return `${(ast as TReference).params}<${typeArgs}>`
       }
-      return ast.params
+      return (ast as TReference).params
     case 'STRING':
       return 'string'
     case 'TUPLE':
       return (() => {
-        const minItems = ast.minItems
-        const maxItems = ast.maxItems || -1
+        const tuple = ast as TTuple
+        const minItems = tuple.minItems
+        const maxItems = tuple.maxItems || -1
 
-        let spreadParam = ast.spreadParam
-        const astParams = [...ast.params]
-        if (minItems > 0 && minItems > astParams.length && ast.spreadParam === undefined) {
+        let spreadParam = tuple.spreadParam
+        const astParams = [...tuple.params]
+        if (minItems > 0 && minItems > astParams.length && tuple.spreadParam === undefined) {
           // this is a valid state, and JSONSchema doesn't care about the item type
           if (maxItems < 0) {
             // no max items and no spread param, so just spread any
             spreadParam = options.unknownAny ? T_UNKNOWN : T_ANY
           }
         }
-        if (maxItems > astParams.length && ast.spreadParam === undefined) {
+        if (maxItems > astParams.length && tuple.spreadParam === undefined) {
           // this is a valid state, and JSONSchema doesn't care about the item type
           // fill the tuple with any elements
           for (let i = astParams.length; i < maxItems; i += 1) {
@@ -333,11 +386,19 @@ function generateRawType(ast: AST, options: Options): string {
         return paramsToString(addSpreadParam(paramsList))
       })()
     case 'UNION':
-      return generateSetOperation(ast, options)
+      return generateSetOperation(ast as TUnion, options)
     case 'UNKNOWN':
       return 'unknown'
+    case 'TYPE_ALIAS':
+      // Type aliases are emitted separately, just reference them by name
+      return (ast as unknown as TTypeAlias).standaloneName
     case 'CUSTOM_TYPE':
-      return ast.params
+      if ('params' in ast) {
+        return ast.params as string
+      }
+      return 'unknown'
+    default:
+      return 'unknown'
   }
 }
 

@@ -3,7 +3,7 @@ import {findKey, includes, isPlainObject, map, memoize, omit} from 'lodash'
 import {format} from 'util'
 import {Options} from './'
 import {applySchemaTyping} from './applySchemaTyping'
-import type {AST, TInterface, TInterfaceParam, TIntersection, TNamedInterface, TTuple} from './types/AST'
+import type {AST, TInterface, TInterfaceParam, TIntersection, TNamedInterface, TTypeAlias, TTuple} from './types/AST'
 import {T_ANY, T_ANY_ADDITIONAL_PROPERTIES, T_UNKNOWN, T_UNKNOWN_ADDITIONAL_PROPERTIES} from './types/AST'
 import type {
   EnumJSONSchema,
@@ -37,6 +37,8 @@ export interface ParseContext {
   currentInterfaceName?: string
   // Collection of all generic interface ASTs that need to be declared
   genericInterfaceASTs: Map<string, TInterface>
+  // Collection of recursive type aliases that need to be declared
+  typeAliases: Map<string, TTypeAlias>
 }
 
 export interface ParseResult {
@@ -206,6 +208,7 @@ export function parseWithContext(schema: NormalizedJSONSchema | JSONSchema4Type,
   const parseContext: ParseContext = {
     genericInterfaces: new Map<string, string>(),
     genericInterfaceASTs: new Map<string, TInterface>(),
+    typeAliases: new Map<string, TTypeAlias>(),
   }
 
   // Pre-scan the schema to identify all interfaces that need type parameters
@@ -236,6 +239,7 @@ export function parse(
     parseContext = {
       genericInterfaces: new Map<string, string>(),
       genericInterfaceASTs: new Map<string, TInterface>(),
+      typeAliases: new Map<string, TTypeAlias>(),
     }
     // Don't pre-scan for backward compatibility - just create empty context
   }
@@ -973,6 +977,40 @@ function parseSchema(
 ): TInterfaceParam[] {
   let asts: TInterfaceParam[] = map(schema.properties, (value, key: string) => {
     let ast = parse(value, options, key, processed, usedNames, anchorContext, parseContext)
+
+    // Check if this property defines a $dynamicAnchor with oneOf/anyOf (recursive union pattern)
+    const hasRecursivePattern = value.$dynamicAnchor && (value.oneOf || value.anyOf) && parentSchemaName && parseContext
+
+    if (hasRecursivePattern) {
+      // Generate type alias name: e.g., "Issue3TestContentChildren"
+      const typeAliasName = toSafeString(parentSchemaName) + toSafeString(key.charAt(0).toUpperCase() + key.slice(1))
+
+      // Check if there are any generic interfaces in the union that would create recursion
+      const hasGenericMembers =
+        ast.type === 'UNION' &&
+        ast.params.some((p: AST) => p.type === 'REFERENCE' && parseContext.genericInterfaces.has((p as any).params))
+
+      if (hasGenericMembers && !parseContext.typeAliases.has(typeAliasName)) {
+        log('blue', 'parser', `Creating recursive type alias: ${typeAliasName}`)
+
+        // Create a type alias that will reference itself
+        // We'll replace generic instantiations with self-references in the generator
+        const typeAlias: TTypeAlias = {
+          type: 'TYPE_ALIAS',
+          standaloneName: typeAliasName,
+          params: ast,
+          comment: `Recursive type for ${parentSchemaName}.${key}`,
+        }
+
+        parseContext.typeAliases.set(typeAliasName, typeAlias)
+
+        // Replace the property AST with a reference to the type alias
+        ast = {
+          type: 'REFERENCE',
+          params: typeAliasName,
+        }
+      }
+    }
 
     // If we're in an anchor context and this is a reference to a generic type, instantiate it
     if (anchorContext && ast.type === 'REFERENCE' && parseContext?.genericInterfaces.has(ast.params)) {

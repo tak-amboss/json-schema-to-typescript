@@ -18,6 +18,7 @@ export type AST =
   | TReference
   | TString
   | TTuple
+  | TTypeAlias
   | TUnion
   | TUnknown
   | TCustomType
@@ -149,6 +150,12 @@ export interface TTuple extends AbstractAST {
 export interface TUnion extends AbstractAST {
   type: 'UNION'
   params: AST[]
+}
+
+export interface TTypeAlias extends AbstractAST {
+  type: 'TYPE_ALIAS'
+  standaloneName: string
+  params: AST
 }
 
 export interface TUnknown extends AbstractAST {

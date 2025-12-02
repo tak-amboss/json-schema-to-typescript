@@ -17,6 +17,7 @@ This fork adds support for JSON Schema Draft 2020-12's `$dynamicRef` and `$dynam
 - Deduplication of interface declarations
 - **Self-referential generic parameter usage** (Issue #2 - Dec 2, 2025)
 - **Generic instantiation for `allOf` patterns** (Issue #4 - Dec 2, 2025)
+- **Recursive type aliases for complex unions** (Issue #3 - Dec 2, 2025)
 
 ## How It Works
 
@@ -24,12 +25,14 @@ This fork adds support for JSON Schema Draft 2020-12's `$dynamicRef` and `$dynam
 `identifyGenericInterfaces()` scans the schema to identify which interfaces need generic type parameters based on `$dynamicRef` usage.
 
 ### 2. Parsing Phase
-- **Generic Interfaces**: Interfaces containing `$dynamicRef` are parsed WITHOUT anchor context to preserve type parameter references (e.g., `TAllowedNodes[]`)
+- **Generic Interfaces**: Interfaces containing `$dynamicRef` are parsed with self-referential anchor context to use type parameters (e.g., `TAllowedNodes[]`)
 - **Anchor Contexts**: When parsing a `$dynamicAnchor`, we create an `AnchorContext` with the allowed types and pass it down
 - **Context Collection**: All generic interfaces are stored in `ParseContext.genericInterfaceASTs` for global emission
+- **Recursive Type Aliases**: Properties with `$dynamicAnchor` + `oneOf`/`anyOf` generate type aliases stored in `ParseContext.typeAliases`
 
 ### 3. Generation Phase
-- **Global Emission**: `declareCollectedGenericInterfaces()` emits all generic interfaces first
+- **Type Alias Emission**: `declareTypeAliases()` emits recursive type aliases first (replaces generic instantiations with self-references)
+- **Generic Interface Emission**: `declareCollectedGenericInterfaces()` emits all generic interfaces
 - **Deduplication**: Tracks declared interface names to prevent duplicate emissions
 - **Instantiation**: When referencing a generic interface from within an anchor context, generates instantiated types (e.g., `TreeNode<TreeNode>`)
 
@@ -73,39 +76,41 @@ export type Issue4Test = Base<string | number>;  // ✅ Proper instantiation
 
 **Solution**: Detect the `allOf` pattern where one member is a generic interface reference and another has `$dynamicAnchor`, then create a REFERENCE with type arguments instead of INTERSECTION.
 
-## Known Limitations
+### ✅ Issue #3: Recursive Type Aliases for Complex Unions
 
-### Limitation 1: No Named Recursive Type Aliases
-
-Complex recursive unions are inlined rather than extracted into named type aliases.
+**Fixed**: Properties with `$dynamicAnchor` and `oneOf`/`anyOf` now generate named recursive type aliases instead of inlining the union.
 
 **Example**:
 ```typescript
-// Current:
-export interface Field {
-  content1?: TextNode | ParagraphNode<TextNode | ParagraphNode>;
-  content2?: TextNode | ParagraphNode<TextNode | ParagraphNode>;  // Duplicated
+// Before:
+export interface Issue3Test {
+  content?: TextNode | ParagraphNode<ParagraphNode>;  // ❌ Loses TextNode in recursive children
 }
 
-// Desired:
-export type FieldAllowedTypes = TextNode | ParagraphNode<FieldAllowedTypes>;
-export interface Field {
-  content1?: FieldAllowedTypes;
-  content2?: FieldAllowedTypes;
+// After:
+export type Issue3TestContent = TextNode | ParagraphNode<Issue3TestContent>;  // ✅ Self-referential
+export interface Issue3Test {
+  content?: Issue3TestContent;  // ✅ Uses type alias
 }
 ```
 
-**Workaround**: The duplicated types are semantically identical and work correctly.
+**Solution**: 
+1. Added `TTypeAlias` AST node type
+2. Detect recursive union patterns in `parseSchema()` when parsing properties
+3. Generate type alias name from parent interface and property name
+4. Store type aliases in `ParseContext.typeAliases`
+5. Replace generic instantiations with self-references in `generateRecursiveType()`
+6. Emit type aliases before interfaces in `generate()`
 
-**Priority**: Medium (readability, type safety at depth 2+)
+**Benefits**:
+- Type information preserved at all nesting levels
+- Better readability and DRY principle
+- Improved IDE autocomplete for nested structures
+- Reusable type definitions
 
-**Status**: Documented as future enhancement. This requires significant changes:
-- New AST node type `TTypeAlias`
-- Detection of recursive patterns
-- Name generation for type aliases (e.g., `FieldContentChildren`)
-- Generator changes to emit type aliases before interfaces
+## Known Limitations
 
-### Limitation 2: Default Type is `unknown` Instead of `any`
+### Limitation: Default Type is `unknown` Instead of `any`
 
 Generic type parameters default to `unknown` rather than `any`.
 
@@ -114,17 +119,17 @@ Generic type parameters default to `unknown` rather than `any`.
 
 **Workaround**: The types work correctly; `unknown` is actually more type-safe.
 
-**Priority**: Very Low (cosmetic)
+**Priority**: Very Low (cosmetic, could be made configurable)
 
 ## Architecture
 
 ### Key Files
 
 - `src/types/JSONSchema.ts`: Extended with `$dynamicRef` and `$dynamicAnchor` properties
-- `src/types/AST.ts`: Added `TDynamicReference` type and `typeParameters`/`typeArguments` support
+- `src/types/AST.ts`: Added `TDynamicReference`, `TTypeAlias`, and `typeParameters`/`typeArguments` support
 - `src/typesOfSchema.ts`: Added `DYNAMIC_REFERENCE` matcher
-- `src/parser.ts`: Core implementation with `parseWithContext()`, anchor context tracking, and generic interface collection
-- `src/generator.ts`: Modified to emit collected generic interfaces and handle instantiation
+- `src/parser.ts`: Core implementation with `parseWithContext()`, anchor context tracking, generic interface collection, and recursive type alias detection
+- `src/generator.ts`: Modified to emit type aliases, collected generic interfaces, and handle instantiation with self-references
 - `src/index.ts`: Updated to use `parseWithContext()` and pass context to generator
 
 ### Key Data Structures
@@ -134,6 +139,7 @@ Generic type parameters default to `unknown` rather than `any`.
 interface ParseContext {
   genericInterfaces: Map<string, string>  // interface name -> type param name
   genericInterfaceASTs: Map<string, TInterface>  // collected generic interfaces
+  typeAliases: Map<string, TTypeAlias>  // collected recursive type aliases
   currentInterfaceName?: string  // for tracking parsing context
 }
 ```
@@ -146,18 +152,30 @@ interface AnchorContext {
 }
 ```
 
+**TTypeAlias** (AST node):
+```typescript
+interface TTypeAlias {
+  type: 'TYPE_ALIAS'
+  standaloneName: string  // e.g., "Issue3TestContent"
+  params: AST  // the union or other type
+  comment?: string
+}
+```
+
 ## Future Improvements
 
 1. ✅ ~~Implement proper generic instantiation for `allOf` compositions~~ (Completed Dec 2, 2025)
 2. ✅ ~~Self-referential generic parameter usage~~ (Completed Dec 2, 2025)
-3. Generate named recursive type aliases for complex unions (Issue #3 - significant architectural change)
+3. ✅ ~~Generate named recursive type aliases for complex unions~~ (Completed Dec 2, 2025)
 4. Make default type (`any` vs `unknown`) configurable
 5. Optimize type parameter detection to handle more edge cases
+6. Support for multiple `$dynamicAnchor` names in a single schema
 
 ## Post-Processing No Longer Needed
 
-With Issues #2 and #4 resolved, the fork now correctly generates:
+With all critical issues (#2, #3, #4) resolved, the fork now correctly generates:
 - Self-referential generic parameters (`children?: TAllowedNodeTypes[]`)
 - Proper `allOf` instantiation (`Base<string | number>`)
+- Recursive type aliases (`type Alias = A | B<Alias>`)
 
-This eliminates the need for post-processing scripts that previously fixed these issues. Only Issue #3 (recursive type aliases) remains unimplemented, which is a readability enhancement rather than a correctness issue.
+This **completely eliminates** the need for post-processing scripts. The generated TypeScript types are production-ready and match the expected behavior for context-dependent recursive types.
