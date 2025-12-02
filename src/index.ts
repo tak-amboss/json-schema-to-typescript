@@ -8,7 +8,7 @@ import {format} from './formatter'
 import {generate} from './generator'
 import {normalize} from './normalizer'
 import {optimize} from './optimizer'
-import {parseWithContext} from './parser'
+import {parseWithContext, collectAnchorContexts} from './parser'
 import {dereference} from './resolver'
 import {error, stripExtension, Try, log, parseFileAsJSONSchema} from './utils'
 import {validate} from './validator'
@@ -150,6 +150,12 @@ export async function compile(schema: JSONSchema4, name: string, options: Partia
   // Initial clone to avoid mutating the input
   const _schema = cloneDeep(schema)
 
+  // Collect anchor contexts BEFORE dereferencing strips $refs
+  const anchorContexts = collectAnchorContexts(_schema)
+  if (process.env.VERBOSE && anchorContexts.size > 0) {
+    log('blue', 'parser', time(), `Collected ${anchorContexts.size} anchor contexts`)
+  }
+
   const {dereferencedPaths, dereferencedSchema} = await dereference(_schema, _options)
   if (process.env.VERBOSE) {
     if (isDeepStrictEqual(_schema, dereferencedSchema)) {
@@ -176,7 +182,7 @@ export async function compile(schema: JSONSchema4, name: string, options: Partia
   const normalized = normalize(linked, dereferencedPaths, name, _options)
   log('yellow', 'normalizer', time(), '✅ Result:', normalized)
 
-  const {ast: parsed, parseContext} = parseWithContext(normalized, _options)
+  const {ast: parsed, parseContext} = parseWithContext(normalized, _options, anchorContexts)
   log('blue', 'parser', time(), '✅ Result:', parsed)
 
   const optimized = optimize(parsed, _options)

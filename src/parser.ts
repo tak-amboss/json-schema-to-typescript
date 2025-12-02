@@ -48,6 +48,8 @@ export interface ParseContext {
   genericInterfaceASTs: Map<string, TInterface>
   // Collection of recursive type aliases that need to be declared
   typeAliases: Map<string, TTypeAlias>
+  // Pre-scanned anchor contexts (collected before normalization strips $refs)
+  anchorContexts: Map<string, AnchorContext>
 }
 
 export interface ParseResult {
@@ -72,6 +74,9 @@ function identifyGenericInterfaces(rootSchema: NormalizedJSONSchema, parseContex
 
   // Process dynamic refs if they exist
   if (dynamicRefs.size > 0) {
+    // Note: Anchor contexts are now collected in compile() before dereference
+    // They're passed into parseWithContext() and available in parseContext.anchorContexts
+
     // For each unique anchor name, find interfaces that contain $dynamicRef to that anchor
     for (const anchorName of dynamicRefs) {
       const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
@@ -118,35 +123,54 @@ function identifyGenericInterfaces(rootSchema: NormalizedJSONSchema, parseContex
  * (not in nested schemas)
  */
 function schemaNeedsTypeParameter(schema: NormalizedJSONSchema): boolean {
-  // Check if any direct property contains $dynamicRef or empty items
-  if (schema.properties) {
-    for (const prop of Object.values(schema.properties)) {
-      if (prop && typeof prop === 'object') {
-        // Check if the property itself has $dynamicRef
-        if ((prop as NormalizedJSONSchema).$dynamicRef) {
+  // Recursively check if schema or any nested property contains $dynamicRef or empty items
+  const visited = new Set<any>()
+
+  const checkSchema = (s: any): boolean => {
+    if (!s || typeof s !== 'object') {
+      return false
+    }
+
+    // Prevent infinite recursion on circular references
+    if (visited.has(s)) {
+      return false
+    }
+    visited.add(s)
+
+    // Check if this schema has $dynamicRef
+    if (s.$dynamicRef) {
+      return true
+    }
+
+    // Check if this schema has empty items
+    if (s.items) {
+      if (!Array.isArray(s.items) && typeof s.items === 'object') {
+        if (s.items.$dynamicRef) {
           return true
         }
-        // Check if the property is an array with items containing $dynamicRef
-        if ((prop as NormalizedJSONSchema).items) {
-          const items = (prop as NormalizedJSONSchema).items
-          if (!Array.isArray(items) && items && typeof items === 'object') {
-            if ((items as NormalizedJSONSchema).$dynamicRef) {
-              return true
-            }
-            // Check for empty items schema: items: {}
-            // This means the array item type should be generic
-            if (
-              Object.keys(items).length === 0 ||
-              (Object.keys(items).length === 1 && 'type' in items && !items.type)
-            ) {
-              return true
-            }
-          }
+        // Check for empty items schema: items: {}
+        if (
+          Object.keys(s.items).length === 0 ||
+          (Object.keys(s.items).length === 1 && 'type' in s.items && !s.items.type)
+        ) {
+          return true
         }
       }
     }
+
+    // Recursively check nested properties
+    if (s.properties) {
+      for (const prop of Object.values(s.properties)) {
+        if (checkSchema(prop)) {
+          return true
+        }
+      }
+    }
+
+    return false
   }
-  return false
+
+  return checkSchema(schema)
 }
 
 /**
@@ -175,6 +199,150 @@ function hasEmptyItemsSchema(schema: NormalizedJSONSchema): boolean {
     }
   }
   return false
+}
+
+/**
+ * Find nested $dynamicAnchor in anyOf members
+ * Returns the anchor context if found
+ */
+function findNestedDynamicAnchor(anyOfMembers: any[]): AnchorContext | null {
+  log('blue', 'parser', `findNestedDynamicAnchor: checking ${anyOfMembers.length} members`)
+
+  for (const member of anyOfMembers) {
+    log(
+      'blue',
+      'parser',
+      `  member has allOf: ${!!member.allOf}, type: ${member.type}, hasProperties: ${!!member.properties}`,
+    )
+
+    // Look for allOf pattern
+    if (member.allOf && Array.isArray(member.allOf)) {
+      log('blue', 'parser', `  allOf has ${member.allOf.length} members`)
+
+      for (let i = 0; i < member.allOf.length; i++) {
+        const m = member.allOf[i]
+        log('blue', 'parser', `    member ${i}: hasRef=${!!m.$ref}, hasProperties=${!!m.properties}`)
+      }
+
+      // Check override member for nested $dynamicAnchor
+      // Pattern: allOf[0] is the base $ref, allOf[1] is the override
+      // Note: In normalized schemas, allOf[0] might have been dereferenced,
+      // so we can't rely on $ref presence. Just use allOf[1] directly.
+      const overrideMember = member.allOf.length >= 2 ? member.allOf[1] : null
+
+      log('blue', 'parser', `  overrideMember found: ${!!overrideMember}, length: ${member.allOf.length}`)
+
+      if (overrideMember && overrideMember.properties) {
+        // Check the RAW properties before normalization
+        const anchor = findDynamicAnchorInRawProperties(overrideMember.properties)
+        if (anchor) {
+          log('blue', 'parser', `  Found anchor: ${anchor.anchorName}`)
+          return anchor
+        }
+      }
+    }
+  }
+
+  log('blue', 'parser', `  No nested anchor found`)
+  return null
+}
+
+/**
+ * Find $dynamicAnchor in raw properties (before normalization/dereferencing)
+ * This checks the properties object directly from the schema
+ */
+function findDynamicAnchorInRawProperties(properties: any): AnchorContext | null {
+  const propKeys = Object.keys(properties)
+  log(
+    'blue',
+    'parser',
+    `    findDynamicAnchorInRawProperties: checking ${propKeys.length} properties: [${propKeys.join(', ')}]`,
+  )
+
+  for (const [propKey, prop] of Object.entries(properties)) {
+    if (prop && typeof prop === 'object') {
+      const propSchema = prop as any
+
+      log(
+        'blue',
+        'parser',
+        `      checking ${propKey}: hasAnchor=${!!propSchema.$dynamicAnchor}, hasProperties=${!!propSchema.properties}, hasItems=${!!propSchema.items}, type=${propSchema.type}`,
+      )
+
+      // Direct check for $dynamicAnchor on this property
+      if (propSchema.$dynamicAnchor && (propSchema.oneOf || propSchema.anyOf)) {
+        const allowedTypeNames: string[] = []
+        const union = propSchema.oneOf || propSchema.anyOf
+
+        for (const item of union) {
+          if (item.$ref) {
+            const refName = item.$ref.split('/').pop()
+            if (refName) {
+              allowedTypeNames.push(toSafeString(refName))
+            }
+          }
+        }
+
+        log('blue', 'parser', `Found $dynamicAnchor in raw property ${propKey}: ${propSchema.$dynamicAnchor}`)
+        return {
+          anchorName: propSchema.$dynamicAnchor,
+          allowedTypeNames,
+        }
+      }
+
+      // Recursively check nested properties
+      if (propSchema.properties) {
+        const nested = findDynamicAnchorInRawProperties(propSchema.properties)
+        if (nested) {
+          return nested
+        }
+      }
+
+      // Check in array items
+      if (propSchema.items && typeof propSchema.items === 'object' && !Array.isArray(propSchema.items)) {
+        const itemKeys = Object.keys(propSchema.items)
+        log(
+          'blue',
+          'parser',
+          `        Checking items of ${propKey}: keys=[${itemKeys.join(',')}], $dynamicAnchor=${!!propSchema.items.$dynamicAnchor}, oneOf=${!!propSchema.items.oneOf}, anyOf=${!!propSchema.items.anyOf}`,
+        )
+
+        if (propSchema.items.$dynamicAnchor && (propSchema.items.oneOf || propSchema.items.anyOf)) {
+          const allowedTypeNames: string[] = []
+          const union = propSchema.items.oneOf || propSchema.items.anyOf
+
+          log('blue', 'parser', `          Extracting types from union of ${union.length} items`)
+
+          for (const item of union) {
+            log('blue', 'parser', `            Item has $ref: ${!!item.$ref}, $ref value: ${item.$ref}`)
+            if (item.$ref) {
+              const refName = item.$ref.split('/').pop()
+              log(
+                'blue',
+                'parser',
+                `              Extracted refName: ${refName}, safe: ${refName ? toSafeString(refName) : 'none'}`,
+              )
+              if (refName) {
+                allowedTypeNames.push(toSafeString(refName))
+              }
+            }
+          }
+
+          log(
+            'blue',
+            'parser',
+            `Found $dynamicAnchor in raw items of ${propKey}: ${propSchema.items.$dynamicAnchor}, extracted ${allowedTypeNames.length} types: [${allowedTypeNames.join(', ')}]`,
+          )
+          return {
+            anchorName: propSchema.items.$dynamicAnchor,
+            allowedTypeNames,
+          }
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 /**
@@ -326,11 +494,62 @@ function getDefaultTypeForDynamicRef(rootSchema: NormalizedJSONSchema, anchorNam
  * Parse a JSON Schema into an AST with context information
  * This is the main entry point that returns both AST and parseContext
  */
-export function parseWithContext(schema: NormalizedJSONSchema | JSONSchema4Type, options: Options): ParseResult {
+/**
+ * Collect anchor contexts from the original schema before any processing
+ * This is called in compile() before dereference strips the $refs
+ */
+export function collectAnchorContexts(schema: any): Map<string, AnchorContext> {
+  const anchorContexts = new Map<string, AnchorContext>()
+
+  function traverse(obj: any) {
+    if (!obj || typeof obj !== 'object') return
+
+    // Check if this object has a $dynamicAnchor with oneOf/anyOf
+    if (obj.$dynamicAnchor && (obj.oneOf || obj.anyOf)) {
+      const union = obj.oneOf || obj.anyOf
+      const allowedTypeNames: string[] = []
+
+      for (const item of union) {
+        if (item.$ref) {
+          const refName = item.$ref.split('/').pop()
+          if (refName) {
+            allowedTypeNames.push(toSafeString(refName))
+          }
+        }
+      }
+
+      if (allowedTypeNames.length > 0) {
+        anchorContexts.set(obj.$dynamicAnchor, {
+          anchorName: obj.$dynamicAnchor,
+          allowedTypeNames,
+        })
+        log('blue', 'parser', `Collected anchor context: ${obj.$dynamicAnchor} -> [${allowedTypeNames.join(', ')}]`)
+      }
+    }
+
+    // Recursively traverse all properties
+    for (const key in obj) {
+      if (key !== '$ref') {
+        // Don't follow $refs during collection
+        traverse(obj[key])
+      }
+    }
+  }
+
+  traverse(schema)
+  return anchorContexts
+}
+
+export function parseWithContext(
+  schema: NormalizedJSONSchema | JSONSchema4Type,
+  options: Options,
+  preCollectedAnchorContexts?: Map<string, AnchorContext>,
+): ParseResult {
   const parseContext: ParseContext = {
     genericInterfaces: new Map<string, string>(),
     genericInterfaceASTs: new Map<string, TInterface>(),
     typeAliases: new Map<string, TTypeAlias>(),
+    anchorContexts: preCollectedAnchorContexts || new Map<string, AnchorContext>(),
   }
 
   // Pre-scan the schema to identify all interfaces that need type parameters
@@ -362,6 +581,7 @@ export function parse(
       genericInterfaces: new Map<string, string>(),
       genericInterfaceASTs: new Map<string, TInterface>(),
       typeAliases: new Map<string, TTypeAlias>(),
+      anchorContexts: new Map<string, AnchorContext>(),
     }
     // Don't pre-scan for backward compatibility - just create empty context
   }
@@ -682,7 +902,265 @@ function parseNonLiteral(
         keyName,
         standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
       }
-    case 'ANY_OF':
+    case 'ANY_OF': {
+      // Debug: Check raw anyOf structure
+      if (schema.anyOf && schema.anyOf.length > 0 && (schema.anyOf[0] as any).allOf) {
+        const firstMember = schema.anyOf[0] as any
+        log('blue', 'parser', `ANY_OF raw: has allOf with ${firstMember.allOf.length} members`)
+
+        if (firstMember.allOf.length >= 2) {
+          const override = firstMember.allOf[1]
+          log('blue', 'parser', `  allOf[1] has properties: ${!!override.properties}`)
+
+          if (override.properties && override.properties.root && override.properties.root.properties) {
+            log('blue', 'parser', `  root.properties has children: ${!!override.properties.root.properties.children}`)
+
+            if (override.properties.root.properties.children && override.properties.root.properties.children.items) {
+              const items = override.properties.root.properties.children.items
+              log(
+                'blue',
+                'parser',
+                `  children.items has: $dynamicAnchor=${!!items.$dynamicAnchor}, oneOf=${!!items.oneOf}`,
+              )
+            }
+          }
+        }
+      }
+
+      // Check if this anyOf contains a nested $dynamicAnchor pattern
+      // Pattern: anyOf contains allOf with Base + override containing $dynamicAnchor
+      const nestedAnchor = findNestedDynamicAnchor(schema.anyOf!)
+
+      log(
+        'blue',
+        'parser',
+        `ANY_OF: nestedAnchor=${!!nestedAnchor}, keyName=${keyName}, currentInterface=${parseContext?.currentInterfaceName}`,
+      )
+
+      if (nestedAnchor && keyName && parseContext?.currentInterfaceName) {
+        // Generate type alias for this field's recursive union
+        // The alias represents the allowed children types for this field
+        const typeAliasName =
+          parseContext.currentInterfaceName +
+          toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1)) +
+          'Children'
+
+        log(
+          'blue',
+          'parser',
+          `Found nested $dynamicAnchor in anyOf for field ${keyName}, anchor=${nestedAnchor.anchorName}, will create type alias: ${typeAliasName}`,
+        )
+
+        // Get the allowed types from the pre-scanned anchor contexts
+        const preScannedAnchor = parseContext.anchorContexts.get(nestedAnchor.anchorName)
+        let effectiveAnchor = nestedAnchor
+        if (preScannedAnchor) {
+          log('blue', 'parser', `  Using pre-scanned allowed types: [${preScannedAnchor.allowedTypeNames.join(', ')}]`)
+          effectiveAnchor = preScannedAnchor
+        } else {
+          log(
+            'blue',
+            'parser',
+            `  WARNING: No pre-scanned anchor found for ${nestedAnchor.anchorName}, types: [${nestedAnchor.allowedTypeNames.join(', ')}]`,
+          )
+        }
+
+        // Parse with the nested anchor context to generate the type alias
+        const anyOfParams = schema.anyOf!.map((_, idx) => {
+          log('blue', 'parser', `  Parsing anyOf member ${idx}`)
+          const ast = parse(_, options, undefined, processed, usedNames, effectiveAnchor, parseContext)
+          log('blue', 'parser', `  Result: type=${ast.type}, standaloneName=${(ast as any).standaloneName}`)
+
+          // If we're in a nested anchor context, we need to instantiate generic interfaces
+          // This can be either a direct INTERFACE or an INTERSECTION containing interfaces
+          if (effectiveAnchor) {
+            if (
+              ast.type === 'INTERFACE' &&
+              ast.standaloneName &&
+              parseContext?.genericInterfaces.has(ast.standaloneName)
+            ) {
+              log(
+                'blue',
+                'parser',
+                `Found generic interface ${ast.standaloneName} in anyOf with nested anchor, using type alias: ${typeAliasName}`,
+              )
+              return {
+                params: ast.standaloneName,
+                type: 'REFERENCE' as const,
+                typeArguments: [
+                  {
+                    type: 'REFERENCE' as const,
+                    params: typeAliasName,
+                  },
+                ],
+              }
+            } else if (ast.type === 'INTERSECTION' && Array.isArray((ast as any).params)) {
+              log('blue', 'parser', `Found INTERSECTION in anyOf, checking for generic interfaces`)
+              // Process intersection parts - instantiate any generic interfaces
+              const intersectionParams = (ast as any).params.map((part: AST, partIdx: number) => {
+                const refParams = part.type === 'REFERENCE' ? (part as any).params : undefined
+                log(
+                  'blue',
+                  'parser',
+                  `  Part ${partIdx}: type=${part.type}, refParams=${refParams}, isGeneric=${refParams && parseContext?.genericInterfaces.has(refParams)}`,
+                )
+
+                // Check if this is a REFERENCE to a generic interface
+                if (part.type === 'REFERENCE' && refParams && parseContext?.genericInterfaces.has(refParams)) {
+                  log(
+                    'blue',
+                    'parser',
+                    `  Part ${partIdx}: generic interface reference ${refParams}, instantiating with ${typeAliasName}`,
+                  )
+                  return {
+                    params: refParams,
+                    type: 'REFERENCE' as const,
+                    typeArguments: [
+                      {
+                        type: 'REFERENCE' as const,
+                        params: typeAliasName,
+                      },
+                    ],
+                  }
+                }
+
+                // Check if this is a standalone INTERFACE that's generic
+                if (
+                  part.type === 'INTERFACE' &&
+                  part.standaloneName &&
+                  parseContext?.genericInterfaces.has(part.standaloneName)
+                ) {
+                  log(
+                    'blue',
+                    'parser',
+                    `  Part ${partIdx}: generic interface ${part.standaloneName}, instantiating with ${typeAliasName}`,
+                  )
+                  return {
+                    params: part.standaloneName,
+                    type: 'REFERENCE' as const,
+                    typeArguments: [
+                      {
+                        type: 'REFERENCE' as const,
+                        params: typeAliasName,
+                      },
+                    ],
+                  }
+                }
+
+                log('blue', 'parser', `  Part ${partIdx}: not generic, keeping as-is`)
+                return part
+              })
+
+              return {
+                ...(ast as any),
+                params: intersectionParams,
+              }
+            }
+          }
+
+          return ast
+        })
+
+        // Build the union of allowed types from the effective anchor
+        // These are the actual node types like ParagraphNode, TextNode, etc.
+        const allowedTypeRefs: AST[] = effectiveAnchor.allowedTypeNames.map(typeName => {
+          // Check if this type is a generic interface
+          if (parseContext.genericInterfaces.has(typeName)) {
+            // Instantiate it with the type alias (for recursion)
+            log('blue', 'parser', `  Allowed type ${typeName} is generic, instantiating with ${typeAliasName}`)
+            return {
+              params: typeName,
+              type: 'REFERENCE' as const,
+              typeArguments: [
+                {
+                  type: 'REFERENCE' as const,
+                  params: typeAliasName,
+                },
+              ],
+            }
+          } else {
+            log('blue', 'parser', `  Allowed type ${typeName} is not generic, plain reference`)
+            return {
+              params: typeName,
+              type: 'REFERENCE' as const,
+            }
+          }
+        })
+
+        const unionAST = {
+          params: allowedTypeRefs,
+          type: 'UNION' as const,
+        }
+
+        // Check if this creates a recursive union
+        // Look for generic interfaces in the anyOf params or nested within intersections
+        const hasGenericInterface = (ast: AST): boolean => {
+          if (ast.type === 'REFERENCE' && parseContext?.genericInterfaces.has((ast as any).params)) {
+            return true
+          }
+          if (ast.type === 'INTERSECTION' && Array.isArray((ast as any).params)) {
+            return (ast as any).params.some((p: AST) => hasGenericInterface(p))
+          }
+          if (ast.type === 'UNION' && Array.isArray((ast as any).params)) {
+            return (ast as any).params.some((p: AST) => hasGenericInterface(p))
+          }
+          return false
+        }
+
+        const hasGenericMembers = anyOfParams.some((p: AST) => hasGenericInterface(p))
+
+        log('blue', 'parser', `  hasGenericMembers=${hasGenericMembers}, anyOfParams count=${anyOfParams.length}`)
+        anyOfParams.forEach((p: AST, idx: number) => {
+          log('blue', 'parser', `    param ${idx}: type=${p.type}`)
+          if (p.type === 'INTERSECTION' && Array.isArray((p as any).params)) {
+            ;(p as any).params.forEach((ip: AST, ipIdx: number) => {
+              log(
+                'blue',
+                'parser',
+                `      intersection part ${ipIdx}: type=${ip.type}, ${ip.type === 'REFERENCE' ? `params=${(ip as any).params}` : ''}`,
+              )
+            })
+          }
+        })
+
+        if (hasGenericMembers && !parseContext.typeAliases.has(typeAliasName)) {
+          log('blue', 'parser', `Creating field-level recursive type alias: ${typeAliasName}`)
+          log('blue', 'parser', `  Union has ${allowedTypeRefs.length} types`)
+          allowedTypeRefs.forEach((ref, idx) => {
+            log(
+              'blue',
+              'parser',
+              `    Type ${idx}: ${(ref as any).params}, hasTypeArgs=${!!(ref as any).typeArguments}`,
+            )
+          })
+
+          const typeAlias: TTypeAlias = {
+            type: 'TYPE_ALIAS',
+            standaloneName: typeAliasName,
+            params: unionAST,
+            comment: `Recursive type alias for ${parseContext.currentInterfaceName}.${keyName}`,
+          }
+
+          parseContext.typeAliases.set(typeAliasName, typeAlias)
+          log(
+            'blue',
+            'parser',
+            `Type alias created, continuing to return anyOf union with ${anyOfParams.length} members`,
+          )
+        }
+
+        // Return the anyOf union (which includes Base<TypeAlias> & {...} | null)
+        return {
+          comment: schema.description,
+          deprecated: schema.deprecated,
+          keyName,
+          standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
+          params: anyOfParams,
+          type: 'UNION',
+        }
+      }
+
+      // Default anyOf handling
       const anyOfParams = schema.anyOf!.map(_ => {
         const ast = parse(_, options, undefined, processed, usedNames, newAnchorContext, parseContext)
 
@@ -721,6 +1199,7 @@ function parseNonLiteral(
         params: anyOfParams,
         type: 'UNION',
       }
+    }
     case 'BOOLEAN':
       return {
         comment: schema.description,
@@ -776,6 +1255,19 @@ function parseNonLiteral(
           'parser',
           `Found generic interface ${ast.standaloneName} in NAMED_SCHEMA with anchor context [${newAnchorContext.allowedTypeNames.join(', ')}]`,
         )
+
+        // Ensure the generic interface is stored before converting to REFERENCE
+        if (parseContext && !parseContext.genericInterfaceASTs.has(ast.standaloneName)) {
+          const hasTypeParams = !!(ast as TInterface).typeParameters
+          log(
+            'blue',
+            'parser',
+            `Storing ${ast.standaloneName}: hasTypeParams=${hasTypeParams}, typeParams=${JSON.stringify((ast as TInterface).typeParameters)}`,
+          )
+          parseContext.genericInterfaceASTs.set(ast.standaloneName, ast as TInterface)
+          log('blue', 'parser', `Stored generic interface ${ast.standaloneName} before converting to REFERENCE`)
+        }
+
         // Create type arguments from the anchor's allowed types
         const typeArguments: AST[] = newAnchorContext.allowedTypeNames.map(typeName => ({
           params: typeName,
@@ -1102,7 +1594,9 @@ function newInterface(
   // Only add type parameters to standalone (named) interfaces
   let typeParameters: Array<{name: string; defaultType?: AST}> | undefined
 
-  if (name && schemaNeedsTypeParameter(schema)) {
+  const needsTypeParam = schemaNeedsTypeParameter(schema)
+
+  if (name && needsTypeParam) {
     const anchorName = getDynamicRefAnchorName(schema)
     if (anchorName) {
       // $dynamicRef pattern
@@ -1118,8 +1612,9 @@ function newInterface(
       ]
 
       log('blue', 'parser', `Adding type parameter ${typeParamName} to interface ${name}`)
-    } else if (hasEmptyItemsSchema(schema)) {
-      // Empty items pattern: items: {}
+    } else {
+      // Either hasEmptyItemsSchema or nested $dynamicRef
+      // Use a default type parameter T
       const typeParamName = 'T'
       const defaultType = options.unknownAny ? T_UNKNOWN : T_ANY
 
@@ -1169,9 +1664,15 @@ function newInterface(
 
   // Store generic interfaces in parseContext so they can be emitted even if not in AST tree
   // Only store if not already stored (to keep the first version which has proper type parameters)
-  if (name && typeParameters && parseContext && !parseContext.genericInterfaceASTs.has(name)) {
-    parseContext.genericInterfaceASTs.set(name, interfaceAST)
-    log('blue', 'parser', `Stored generic interface ${name} for later emission`)
+  if (name && typeParameters && parseContext) {
+    if (!parseContext.genericInterfaceASTs.has(name)) {
+      parseContext.genericInterfaceASTs.set(name, interfaceAST)
+      log('blue', 'parser', `Stored generic interface ${name} for later emission`)
+    } else {
+      log('blue', 'parser', `Generic interface ${name} already stored, skipping`)
+    }
+  } else if (name && typeParameters) {
+    log('blue', 'parser', `Would store generic interface ${name} but parseContext is missing`)
   }
 
   return interfaceAST
