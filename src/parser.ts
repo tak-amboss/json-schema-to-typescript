@@ -82,11 +82,14 @@ function identifyGenericInterfaces(rootSchema: NormalizedJSONSchema, parseContex
       const typeParamName = 'T' + anchorName.charAt(0).toUpperCase() + anchorName.slice(1)
 
       // Find all interfaces that contain this $dynamicRef
-      traverse(rootSchema, (s: LinkedJSONSchema) => {
+      traverse(rootSchema, (s: LinkedJSONSchema, key: string | null) => {
         const normalized = s as NormalizedJSONSchema
-        if (normalized.$id && schemaNeedsTypeParameter(normalized)) {
-          const interfaceName = toSafeString(normalized.$id)
-          if (!parseContext.genericInterfaces.has(interfaceName)) {
+        if (schemaNeedsTypeParameter(normalized)) {
+          // Use the same priority as standaloneName: title || $id || key
+          // This ensures registration name matches the name used later
+          const rawName = normalized.title || normalized.$id || (key ? key : null)
+          const interfaceName = rawName ? toSafeString(rawName) : null
+          if (interfaceName && !parseContext.genericInterfaces.has(interfaceName)) {
             parseContext.genericInterfaces.set(interfaceName, typeParamName)
             log(
               'blue',
@@ -100,11 +103,14 @@ function identifyGenericInterfaces(rootSchema: NormalizedJSONSchema, parseContex
   }
 
   // Also identify interfaces with empty items schemas (allOf pattern)
-  traverse(rootSchema, (s: LinkedJSONSchema) => {
+  traverse(rootSchema, (s: LinkedJSONSchema, key: string | null) => {
     const normalized = s as NormalizedJSONSchema
-    if (normalized.$id && hasEmptyItemsSchema(normalized)) {
-      const interfaceName = toSafeString(normalized.$id)
-      if (!parseContext.genericInterfaces.has(interfaceName)) {
+    if (hasEmptyItemsSchema(normalized)) {
+      // Use the same priority as standaloneName: title || $id || key
+      // This ensures registration name matches the name used later
+      const rawName = normalized.title || normalized.$id || (key ? key : null)
+      const interfaceName = rawName ? toSafeString(rawName) : null
+      if (interfaceName && !parseContext.genericInterfaces.has(interfaceName)) {
         const typeParamName = 'T'
         parseContext.genericInterfaces.set(interfaceName, typeParamName)
         log(
@@ -760,9 +766,29 @@ function parseNonLiteral(
           // Parse the anchor member to get the type union
           const typeArgAST = parse(anchorMember, options, undefined, processed, usedNames, undefined, parseContext)
 
-          // Get the interface name from either standaloneName or params (for REFERENCE nodes)
+          // Get the interface name - prefer $id or definition key for generic interface lookups
+          // (genericInterfaces are registered using $id or definition key, not title)
+          const baseMemberSchema = baseMember as NormalizedJSONSchema
+
+          // Try to extract definition key from $ref if present
+          let baseMemberKeyFromRef: string | null = null
+          if (baseMemberSchema.$ref) {
+            const refMatch = baseMemberSchema.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)
+            if (refMatch) {
+              baseMemberKeyFromRef = refMatch[1]
+            }
+          }
+
+          // Also try to find in definitions by identity
+          const baseMemberDefinitions = getDefinitionsMemoized(getRootSchema(baseMemberSchema))
+          const baseMemberKeyFromDef = findKey(baseMemberDefinitions, _ => _ === baseMemberSchema)
+
           const interfaceName =
-            baseAST.standaloneName || (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
+            (baseMemberSchema.$id ? toSafeString(baseMemberSchema.$id) : null) ||
+            (baseMemberKeyFromRef ? toSafeString(baseMemberKeyFromRef) : null) ||
+            (baseMemberKeyFromDef ? toSafeString(baseMemberKeyFromDef) : null) ||
+            baseAST.standaloneName ||
+            (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
 
           // If the base is a generic interface, create instantiation
           if (
@@ -784,11 +810,26 @@ function parseNonLiteral(
       }
 
       // Pattern 2: Check for allOf with base (has empty items) + override pattern
-      // By this point, $ref may be dereferenced, so we check for:
-      // - One member with empty items (the base)
-      // - One member with concrete items (the override)
+      // Check for:
+      // - One member with empty items or a $ref to a generic interface (the base)
+      // - One member with concrete properties (the override)
       if (schema.allOf!.length === 2) {
-        const baseMember = schema.allOf!.find((m: any) => hasEmptyItemsSchema(m as NormalizedJSONSchema))
+        // Helper to check if a member is a base (has empty items or is a $ref to a generic interface)
+        const isBaseMember = (m: any): boolean => {
+          if (hasEmptyItemsSchema(m as NormalizedJSONSchema)) {
+            return true
+          }
+          // Check if it's a $ref to a generic interface
+          if (m.$ref) {
+            const refMatch = m.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)
+            if (refMatch && parseContext?.genericInterfaces.has(toSafeString(refMatch[1]))) {
+              return true
+            }
+          }
+          return false
+        }
+
+        const baseMember = schema.allOf!.find(isBaseMember)
         const overrideMember = schema.allOf!.find((m: any) => m !== baseMember && m.properties)
 
         log(
@@ -801,9 +842,29 @@ function parseNonLiteral(
           // Parse the base to get the interface
           const baseAST = parse(baseMember, options, undefined, processed, usedNames, undefined, parseContext)
 
-          // Get the interface name
+          // Get the interface name - prefer $id or definition key for generic interface lookups
+          // (genericInterfaces are registered using $id or definition key, not title)
+          const baseMemberSchema = baseMember as NormalizedJSONSchema
+
+          // Try to extract definition key from $ref if present
+          let baseMemberKeyFromRef: string | null = null
+          if (baseMemberSchema.$ref) {
+            const refMatch = baseMemberSchema.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)
+            if (refMatch) {
+              baseMemberKeyFromRef = refMatch[1]
+            }
+          }
+
+          // Also try to find in definitions by identity
+          const baseMemberDefinitions = getDefinitionsMemoized(getRootSchema(baseMemberSchema))
+          const baseMemberKeyFromDef = findKey(baseMemberDefinitions, _ => _ === baseMemberSchema)
+
           const interfaceName =
-            baseAST.standaloneName || (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
+            (baseMemberSchema.$id ? toSafeString(baseMemberSchema.$id) : null) ||
+            (baseMemberKeyFromRef ? toSafeString(baseMemberKeyFromRef) : null) ||
+            (baseMemberKeyFromDef ? toSafeString(baseMemberKeyFromDef) : null) ||
+            baseAST.standaloneName ||
+            (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
 
           log(
             'blue',
