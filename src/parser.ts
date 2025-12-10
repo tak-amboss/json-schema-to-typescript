@@ -280,13 +280,10 @@ function findDynamicAnchorInRawProperties(properties: any): AnchorContext | null
         const allowedTypeNames: string[] = []
         const union = propSchema.oneOf || propSchema.anyOf
 
+        // Use consistent type extraction that handles nested allOf
         for (const item of union) {
-          if (item.$ref) {
-            const refName = item.$ref.split('/').pop()
-            if (refName) {
-              allowedTypeNames.push(toSafeString(refName))
-            }
-          }
+          const names = extractTypeNamesFromUnionItem(item)
+          allowedTypeNames.push(...names)
         }
 
         log('blue', 'parser', `Found $dynamicAnchor in raw property ${propKey}: ${propSchema.$dynamicAnchor}`)
