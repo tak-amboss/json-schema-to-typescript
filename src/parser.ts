@@ -320,18 +320,9 @@ function findDynamicAnchorInRawProperties(properties: any): AnchorContext | null
           log('blue', 'parser', `          Extracting types from union of ${union.length} items`)
 
           for (const item of union) {
-            log('blue', 'parser', `            Item has $ref: ${!!item.$ref}, $ref value: ${item.$ref}`)
-            if (item.$ref) {
-              const refName = item.$ref.split('/').pop()
-              log(
-                'blue',
-                'parser',
-                `              Extracted refName: ${refName}, safe: ${refName ? toSafeString(refName) : 'none'}`,
-              )
-              if (refName) {
-                allowedTypeNames.push(toSafeString(refName))
-              }
-            }
+            const names = extractTypeNamesFromUnionItem(item)
+            log('blue', 'parser', `            Extracted names from item: [${names.join(', ')}]`)
+            allowedTypeNames.push(...names)
           }
 
           log(
@@ -361,6 +352,7 @@ function extractTypeArgumentFromOverride(
   processed: Processed,
   usedNames: UsedNames,
   parseContext?: ParseContext,
+  anchorContext?: AnchorContext,
 ): AST | null {
   if (!overrideMember.properties) {
     return null
@@ -381,14 +373,14 @@ function extractTypeArgumentFromOverride(
               (items as NormalizedJSONSchema).anyOf ||
               (items as NormalizedJSONSchema).$dynamicAnchor
             ) {
-              // Parse this as the type argument
+              // Parse this as the type argument, passing anchor context for proper type instantiation
               return parse(
                 items as NormalizedJSONSchema,
                 options,
                 undefined,
                 processed,
                 usedNames,
-                undefined,
+                anchorContext,
                 parseContext,
               )
             }
@@ -399,7 +391,7 @@ function extractTypeArgumentFromOverride(
                 undefined,
                 processed,
                 usedNames,
-                undefined,
+                anchorContext,
                 parseContext,
               )
             }
@@ -515,6 +507,35 @@ function getDefaultTypeForDynamicRef(rootSchema: NormalizedJSONSchema, anchorNam
  * This is the main entry point that returns both AST and parseContext
  */
 /**
+ * Extract type names from a union item, handling nested allOf patterns
+ */
+function extractTypeNamesFromUnionItem(item: any): string[] {
+  const names: string[] = []
+
+  // Direct $ref
+  if (item.$ref) {
+    const refName = item.$ref.split('/').pop()
+    if (refName) {
+      names.push(toSafeString(refName))
+    }
+  }
+
+  // Nested allOf pattern (e.g., for property constraints)
+  if (item.allOf && Array.isArray(item.allOf)) {
+    for (const allOfMember of item.allOf) {
+      if (allOfMember.$ref) {
+        const refName = allOfMember.$ref.split('/').pop()
+        if (refName) {
+          names.push(toSafeString(refName))
+        }
+      }
+    }
+  }
+
+  return names
+}
+
+/**
  * Collect anchor contexts from the original schema before any processing
  * This is called in compile() before dereference strips the $refs
  */
@@ -530,12 +551,8 @@ export function collectAnchorContexts(schema: any): Map<string, AnchorContext> {
       const allowedTypeNames: string[] = []
 
       for (const item of union) {
-        if (item.$ref) {
-          const refName = item.$ref.split('/').pop()
-          if (refName) {
-            allowedTypeNames.push(toSafeString(refName))
-          }
-        }
+        const names = extractTypeNamesFromUnionItem(item)
+        allowedTypeNames.push(...names)
       }
 
       if (allowedTypeNames.length > 0) {
@@ -897,7 +914,16 @@ function parseNonLiteral(
             parseContext?.genericInterfaces.has(interfaceName)
           ) {
             // Look for the property override that provides the concrete type
-            const typeArg = extractTypeArgumentFromOverride(overrideMember, options, processed, usedNames, parseContext)
+            // Note: Don't pass anchorContext here - it will cause nested types to use self-references
+            // The anchor context will be applied later when we create the type alias
+            const typeArg = extractTypeArgumentFromOverride(
+              overrideMember,
+              options,
+              processed,
+              usedNames,
+              parseContext,
+              undefined, // anchorContext
+            )
 
             if (typeArg) {
               // Check if this creates a recursive union that should be a type alias
