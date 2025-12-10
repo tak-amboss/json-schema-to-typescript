@@ -1520,6 +1520,7 @@ function parseNonLiteral(
         keyName,
         keyNameFromDefinition,
         newAnchorContext,
+        parseContext,
       )
     case 'UNTYPED_ARRAY':
       // normalised to not be undefined
