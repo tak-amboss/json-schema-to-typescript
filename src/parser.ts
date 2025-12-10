@@ -1133,11 +1133,19 @@ function parseNonLiteral(
 
             if (typeArg) {
               // Check if this creates a recursive union that should be a type alias
+              // Need to check within intersections too (for allOf constraint patterns)
+              const hasGenericRef = (ast: AST): boolean => {
+                if (ast.type === 'REFERENCE' && parseContext?.genericInterfaces.has((ast as any).params)) {
+                  return true
+                }
+                if (ast.type === 'INTERSECTION' && Array.isArray((ast as any).params)) {
+                  return (ast as any).params.some((p: AST) => hasGenericRef(p))
+                }
+                return false
+              }
+
               const isRecursiveUnion =
-                typeArg.type === 'UNION' &&
-                (typeArg as TUnion).params.some(
-                  (p: AST) => p.type === 'REFERENCE' && parseContext?.genericInterfaces.has((p as any).params),
-                )
+                typeArg.type === 'UNION' && (typeArg as TUnion).params.some((p: AST) => hasGenericRef(p))
 
               // Get parent schema name - could be from parse context or from root schema
               const parentName = parseContext?.currentInterfaceName || (schema.$id && toSafeString(schema.$id))
