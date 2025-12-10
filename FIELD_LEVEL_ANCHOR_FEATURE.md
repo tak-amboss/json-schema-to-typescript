@@ -1,6 +1,9 @@
 # Feature Request: Field-Level `$dynamicAnchor` Support
 
-## Status: **NOT CURRENTLY SUPPORTED** ⚠️
+## Status: ✅ **IMPLEMENTED** (Commit 0be31c3)
+
+> **Solution:** Post-processing genericization approach.  
+> See `POST_PROCESS_GENERICIZATION.md` for implementation details.
 
 ## Summary
 
