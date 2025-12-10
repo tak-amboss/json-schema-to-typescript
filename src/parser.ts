@@ -1263,6 +1263,17 @@ function parseNonLiteral(
               }
             }
 
+            if (ast.type === 'INTERFACE' && Array.isArray((ast as any).params)) {
+              // Process interface parameters (each param has an ast field)
+              return {
+                ...ast,
+                params: (ast as any).params.map((param: any) => ({
+                  ...param,
+                  ast: replaceSelfReferences(param.ast),
+                })),
+              }
+            }
+
             if (ast.type === 'INTERSECTION' && Array.isArray((ast as any).params)) {
               return {
                 ...ast,
@@ -1274,6 +1285,14 @@ function parseNonLiteral(
               return {
                 ...ast,
                 params: (ast as any).params.map((p: AST) => replaceSelfReferences(p)),
+              }
+            }
+
+            if (ast.type === 'ARRAY' && (ast as any).params) {
+              // Process array element types
+              return {
+                ...ast,
+                params: replaceSelfReferences((ast as any).params),
               }
             }
 
