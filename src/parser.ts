@@ -1063,7 +1063,7 @@ function parseNonLiteral(
         }
 
         // Parse with the nested anchor context to generate the type alias
-        const anyOfParams = schema.anyOf!.map((_, idx) => {
+        let anyOfParams = schema.anyOf!.map((_, idx) => {
           log('blue', 'parser', `  Parsing anyOf member ${idx}`)
           const ast = parse(_, options, undefined, processed, usedNames, effectiveAnchor, parseContext)
           log('blue', 'parser', `  Result: type=${ast.type}, standaloneName=${(ast as any).standaloneName}`)
@@ -1239,11 +1239,52 @@ function parseNonLiteral(
           }
 
           parseContext.typeAliases.set(typeAliasName, typeAlias)
-          log(
-            'blue',
-            'parser',
-            `Type alias created, continuing to return anyOf union with ${anyOfParams.length} members`,
-          )
+          log('blue', 'parser', `Type alias created, now replacing self-references in anyOf params`)
+
+          // Replace self-referential generic type arguments with the type alias
+          // This handles cases like Heading<Heading> -> Heading<TypeAliasName>
+          function replaceSelfReferences(ast: AST): AST {
+            if (ast.type === 'REFERENCE' && (ast as any).typeArguments) {
+              const typeArgs = (ast as any).typeArguments as AST[]
+              const newTypeArgs = typeArgs.map((arg: AST) => {
+                // Replace self-referential types (e.g., Heading in Heading<Heading>)
+                if (
+                  arg.type === 'REFERENCE' &&
+                  (arg as any).params === (ast as any).params &&
+                  parseContext?.genericInterfaces.has((arg as any).params)
+                ) {
+                  return {
+                    type: 'REFERENCE' as const,
+                    params: typeAliasName,
+                  }
+                }
+                return replaceSelfReferences(arg)
+              })
+              return {
+                ...ast,
+                typeArguments: newTypeArgs,
+              }
+            }
+
+            if (ast.type === 'INTERSECTION' && Array.isArray((ast as any).params)) {
+              return {
+                ...ast,
+                params: (ast as any).params.map((p: AST) => replaceSelfReferences(p)),
+              }
+            }
+
+            if (ast.type === 'UNION' && Array.isArray((ast as any).params)) {
+              return {
+                ...ast,
+                params: (ast as any).params.map((p: AST) => replaceSelfReferences(p)),
+              }
+            }
+
+            return ast
+          }
+
+          // Rewrite anyOfParams to use the type alias
+          anyOfParams = anyOfParams.map(param => replaceSelfReferences(param))
         }
 
         // Return the anyOf union (which includes Base<TypeAlias> & {...} | null)
