@@ -366,44 +366,58 @@ function extractTypeArgumentFromOverride(
     return null
   }
 
-  // Find the first array property with concrete items
-  for (const prop of Object.values(overrideMember.properties)) {
-    if (prop && typeof prop === 'object') {
-      const propSchema = prop as NormalizedJSONSchema
-      // Look for array with items
-      if (propSchema.type === 'array' && propSchema.items) {
-        const items = propSchema.items
-        if (!Array.isArray(items) && typeof items === 'object') {
-          // Check if items has concrete type (oneOf, anyOf, type, $ref)
-          if ((items as NormalizedJSONSchema).oneOf || (items as NormalizedJSONSchema).anyOf) {
-            // Parse this as the type argument
-            return parse(
-              items as NormalizedJSONSchema,
-              options,
-              undefined,
-              processed,
-              usedNames,
-              undefined,
-              parseContext,
-            )
+  // Recursively find the first array property with concrete items
+  function findArrayItems(props: any): AST | null {
+    for (const prop of Object.values(props)) {
+      if (prop && typeof prop === 'object') {
+        const propSchema = prop as NormalizedJSONSchema
+        // Look for array with items
+        if (propSchema.type === 'array' && propSchema.items) {
+          const items = propSchema.items
+          if (!Array.isArray(items) && typeof items === 'object') {
+            // Check if items has concrete type (oneOf, anyOf, type, $ref, $dynamicAnchor)
+            if (
+              (items as NormalizedJSONSchema).oneOf ||
+              (items as NormalizedJSONSchema).anyOf ||
+              (items as NormalizedJSONSchema).$dynamicAnchor
+            ) {
+              // Parse this as the type argument
+              return parse(
+                items as NormalizedJSONSchema,
+                options,
+                undefined,
+                processed,
+                usedNames,
+                undefined,
+                parseContext,
+              )
+            }
+            if ((items as NormalizedJSONSchema).type || (items as NormalizedJSONSchema).$ref) {
+              return parse(
+                items as NormalizedJSONSchema,
+                options,
+                undefined,
+                processed,
+                usedNames,
+                undefined,
+                parseContext,
+              )
+            }
           }
-          if ((items as NormalizedJSONSchema).type || (items as NormalizedJSONSchema).$ref) {
-            return parse(
-              items as NormalizedJSONSchema,
-              options,
-              undefined,
-              processed,
-              usedNames,
-              undefined,
-              parseContext,
-            )
+        }
+        // Recursively search nested properties
+        if (propSchema.properties) {
+          const result = findArrayItems(propSchema.properties)
+          if (result) {
+            return result
           }
         }
       }
     }
+    return null
   }
 
-  return null
+  return findArrayItems(overrideMember.properties)
 }
 
 /**
@@ -826,6 +840,10 @@ function parseNonLiteral(
               return true
             }
           }
+          // Check if it's a dereferenced schema with $id matching a generic interface
+          if (m.$id && parseContext?.genericInterfaces.has(toSafeString(m.$id))) {
+            return true
+          }
           return false
         }
 
@@ -892,6 +910,8 @@ function parseNonLiteral(
               // Get parent schema name - could be from parse context or from root schema
               const parentName = parseContext?.currentInterfaceName || (schema.$id && toSafeString(schema.$id))
 
+              let finalTypeArg = typeArg
+
               if (isRecursiveUnion && keyName && parentName) {
                 // Generate type alias for the recursive union
                 const typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
@@ -907,23 +927,13 @@ function parseNonLiteral(
                   }
 
                   parseContext.typeAliases.set(typeAliasName, typeAlias)
-
-                  // Return reference with type alias instead of direct typeArg
-                  return {
-                    comment: schema.description,
-                    deprecated: schema.deprecated,
-                    keyName,
-                    standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
-                    params: interfaceName,
-                    type: 'REFERENCE',
-                    typeArguments: [
-                      {
-                        type: 'REFERENCE',
-                        params: typeAliasName,
-                      },
-                    ],
-                  }
                 }
+
+                // Use reference to the type alias instead of the raw union
+                finalTypeArg = {
+                  type: 'REFERENCE',
+                  params: typeAliasName,
+                } as AST
               }
 
               log('blue', 'parser', `Creating generic instantiation: ${interfaceName}<...>`)
@@ -934,7 +944,7 @@ function parseNonLiteral(
                 standaloneName: standaloneName(schema, keyNameFromDefinition, usedNames, options),
                 params: interfaceName,
                 type: 'REFERENCE',
-                typeArguments: [typeArg],
+                typeArguments: [finalTypeArg],
               }
             }
           }
