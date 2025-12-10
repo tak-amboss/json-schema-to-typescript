@@ -52,6 +52,8 @@ export interface ParseContext {
   typeAliases: Map<string, TTypeAlias>
   // Pre-scanned anchor contexts (collected before normalization strips $refs)
   anchorContexts: Map<string, AnchorContext>
+  // Current type alias being generated (for nested patterns to reference)
+  currentTypeAliasName?: string
 }
 
 export interface ParseResult {
@@ -1140,11 +1142,24 @@ function parseNonLiteral(
               // Get parent schema name - could be from parse context or from root schema
               const parentName = parseContext?.currentInterfaceName || (schema.$id && toSafeString(schema.$id))
 
+              log(
+                'blue',
+                'parser',
+                `Pattern 2: isRecursiveUnion=${isRecursiveUnion}, keyName=${keyName}, parentName=${parentName}, typeArg.type=${typeArg.type}, currentTypeAliasName=${parseContext?.currentTypeAliasName}`,
+              )
+
               let finalTypeArg = typeArg
 
-              if (isRecursiveUnion && keyName && parentName) {
-                // Generate type alias for the recursive union
-                const typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
+              // Check if we should use a type alias
+              let typeAliasName: string | undefined
+
+              // First priority: use currentTypeAliasName if set (from anyOf handler)
+              if (parseContext?.currentTypeAliasName) {
+                typeAliasName = parseContext.currentTypeAliasName
+                log('blue', 'parser', `Pattern 2: Using currentTypeAliasName from context: ${typeAliasName}`)
+              } else if (isRecursiveUnion && keyName && parentName) {
+                // Second priority: create our own type alias if we have keyName
+                typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
 
                 if (!parseContext.typeAliases.has(typeAliasName)) {
                   log('blue', 'parser', `Creating recursive type alias for allOf pattern: ${typeAliasName}`)
@@ -1158,12 +1173,15 @@ function parseNonLiteral(
 
                   parseContext.typeAliases.set(typeAliasName, typeAlias)
                 }
+              }
 
+              if (typeAliasName && isRecursiveUnion) {
                 // Use reference to the type alias instead of the raw union
                 finalTypeArg = {
                   type: 'REFERENCE',
                   params: typeAliasName,
                 } as AST
+                log('blue', 'parser', `Pattern 2: Using type alias ${typeAliasName} instead of raw union`)
               }
 
               log('blue', 'parser', `Creating generic instantiation: ${interfaceName}<...>`)
@@ -1265,6 +1283,9 @@ function parseNonLiteral(
             `  WARNING: No pre-scanned anchor found for ${nestedAnchor.anchorName}, types: [${nestedAnchor.allowedTypeNames.join(', ')}]`,
           )
         }
+
+        // Store the type alias name so nested patterns (like Pattern 2) can reference it
+        parseContext.currentTypeAliasName = typeAliasName
 
         // Parse with the nested anchor context to generate the type alias
         let anyOfParams = schema.anyOf!.map((_, idx) => {
@@ -1605,6 +1626,12 @@ function parseNonLiteral(
 
         return ast
       })
+
+      // Clear the current type alias name after processing
+      if (parseContext && parseContext.currentTypeAliasName) {
+        log('blue', 'parser', `Clearing currentTypeAliasName: ${parseContext.currentTypeAliasName}`)
+        parseContext.currentTypeAliasName = undefined
+      }
 
       return {
         comment: schema.description,
