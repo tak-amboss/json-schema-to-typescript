@@ -574,6 +574,119 @@ export function collectAnchorContexts(schema: any): Map<string, AnchorContext> {
   return anchorContexts
 }
 
+/**
+ * Post-process generic interfaces to make them truly generic with T = unknown
+ * This prevents field-specific defaults from leaking into shared node definitions
+ */
+function genericizeInterfaces(parseContext: ParseContext, options: Options): void {
+  // Track which interfaces appear in which type aliases (anchor contexts)
+  const interfaceUsage = new Map<string, Set<string>>() // interfaceName -> Set<typeAliasName>
+
+  // Check all type aliases to find which interfaces are used where
+  for (const [typeAliasName, typeAlias] of parseContext.typeAliases.entries()) {
+    // Walk the type alias to find referenced generic interfaces
+    function findReferencedGenerics(node: AST) {
+      if (node.type === 'REFERENCE' && typeof (node as any).params === 'string') {
+        const refName = (node as any).params
+        if (parseContext.genericInterfaces.has(refName)) {
+          if (!interfaceUsage.has(refName)) {
+            interfaceUsage.set(refName, new Set())
+          }
+          interfaceUsage.get(refName)!.add(typeAliasName)
+        }
+      }
+      if (node.type === 'UNION' && Array.isArray((node as any).params)) {
+        ;(node as any).params.forEach((p: AST) => findReferencedGenerics(p))
+      }
+      if (node.type === 'INTERSECTION' && Array.isArray((node as any).params)) {
+        ;(node as any).params.forEach((p: AST) => findReferencedGenerics(p))
+      }
+    }
+
+    findReferencedGenerics(typeAlias.params)
+  }
+
+  // Only genericize interfaces that are used in MULTIPLE type aliases
+  // (i.e., shared across different fields/contexts)
+  const interfacesToGenericize = new Set<string>()
+  for (const [interfaceName, typeAliases] of interfaceUsage.entries()) {
+    if (typeAliases.size > 1) {
+      interfacesToGenericize.add(interfaceName)
+      log(
+        'blue',
+        'parser',
+        `Interface ${interfaceName} used in ${typeAliases.size} contexts: [${Array.from(typeAliases).join(', ')}] - genericizing`,
+      )
+    }
+  }
+
+  log(
+    'blue',
+    'parser',
+    `Genericizing ${interfacesToGenericize.size} shared interfaces: [${Array.from(interfacesToGenericize).join(', ')}]`,
+  )
+
+  // No need to walk the main AST - generic interfaces are emitted from genericInterfaceASTs
+
+  // Also update the stored generic interface ASTs
+  for (const interfaceName of interfacesToGenericize) {
+    const interfaceAST = parseContext.genericInterfaceASTs.get(interfaceName)
+    if (interfaceAST && interfaceAST.typeParameters) {
+      const oldParamName = interfaceAST.typeParameters[0].name
+      const defaultType = options.unknownAny ? T_UNKNOWN : T_ANY
+
+      // Replace references to the old parameter name with 'T' in the interface body
+      function replaceParamReferences(ast: AST): AST {
+        if (ast.type === 'REFERENCE' && (ast as any).params === oldParamName) {
+          return {
+            ...ast,
+            params: 'T',
+          }
+        }
+
+        if (ast.type === 'ARRAY' && (ast as any).params) {
+          return {
+            ...ast,
+            params: replaceParamReferences((ast as any).params),
+          }
+        }
+
+        if (ast.type === 'INTERFACE' && Array.isArray((ast as any).params)) {
+          return {
+            ...ast,
+            params: (ast as any).params.map((param: any) => ({
+              ...param,
+              ast: replaceParamReferences(param.ast),
+            })),
+          }
+        }
+
+        if ((ast.type === 'UNION' || ast.type === 'INTERSECTION') && Array.isArray((ast as any).params)) {
+          return {
+            ...ast,
+            params: (ast as any).params.map((p: AST) => replaceParamReferences(p)),
+          }
+        }
+
+        return ast
+      }
+
+      interfaceAST.params = interfaceAST.params.map(param => ({
+        ...param,
+        ast: replaceParamReferences(param.ast),
+      }))
+
+      interfaceAST.typeParameters = [
+        {
+          name: 'T',
+          defaultType,
+        },
+      ]
+      log('blue', 'parser', `  Updated stored interface ${interfaceName}: ${oldParamName} -> T`)
+    }
+  }
+}
+
 export function parseWithContext(
   schema: NormalizedJSONSchema | JSONSchema4Type,
   options: Options,
@@ -592,6 +705,10 @@ export function parseWithContext(
   }
 
   const ast = parse(schema, options, undefined, new Map(), new Set(), undefined, parseContext)
+
+  // Post-process: Make generic interfaces truly generic (T = unknown) instead of field-specific
+  genericizeInterfaces(parseContext, options)
+
   return {ast, parseContext}
 }
 
