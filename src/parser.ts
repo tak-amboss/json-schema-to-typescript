@@ -35,6 +35,8 @@ export type UsedNames = Set<string>
 export interface AnchorContext {
   anchorName: string
   allowedTypeNames: string[]
+  // Map of type name -> constraint schema (for allOf patterns in oneOf items)
+  typeConstraints?: Map<string, any>
 }
 
 /**
@@ -278,18 +280,24 @@ function findDynamicAnchorInRawProperties(properties: any): AnchorContext | null
       // Direct check for $dynamicAnchor on this property
       if (propSchema.$dynamicAnchor && (propSchema.oneOf || propSchema.anyOf)) {
         const allowedTypeNames: string[] = []
+        const allConstraints = new Map<string, any>()
         const union = propSchema.oneOf || propSchema.anyOf
 
         // Use consistent type extraction that handles nested allOf
         for (const item of union) {
-          const names = extractTypeNamesFromUnionItem(item)
+          const {names, constraints} = extractTypeNamesFromUnionItem(item)
           allowedTypeNames.push(...names)
+          // Merge constraints
+          for (const [typeName, constraint] of constraints.entries()) {
+            allConstraints.set(typeName, constraint)
+          }
         }
 
         log('blue', 'parser', `Found $dynamicAnchor in raw property ${propKey}: ${propSchema.$dynamicAnchor}`)
         return {
           anchorName: propSchema.$dynamicAnchor,
           allowedTypeNames,
+          typeConstraints: allConstraints.size > 0 ? allConstraints : undefined,
         }
       }
 
@@ -312,14 +320,19 @@ function findDynamicAnchorInRawProperties(properties: any): AnchorContext | null
 
         if (propSchema.items.$dynamicAnchor && (propSchema.items.oneOf || propSchema.items.anyOf)) {
           const allowedTypeNames: string[] = []
+          const allConstraints = new Map<string, any>()
           const union = propSchema.items.oneOf || propSchema.items.anyOf
 
           log('blue', 'parser', `          Extracting types from union of ${union.length} items`)
 
           for (const item of union) {
-            const names = extractTypeNamesFromUnionItem(item)
+            const {names, constraints} = extractTypeNamesFromUnionItem(item)
             log('blue', 'parser', `            Extracted names from item: [${names.join(', ')}]`)
             allowedTypeNames.push(...names)
+            // Merge constraints
+            for (const [typeName, constraint] of constraints.entries()) {
+              allConstraints.set(typeName, constraint)
+            }
           }
 
           log(
@@ -330,6 +343,7 @@ function findDynamicAnchorInRawProperties(properties: any): AnchorContext | null
           return {
             anchorName: propSchema.items.$dynamicAnchor,
             allowedTypeNames,
+            typeConstraints: allConstraints.size > 0 ? allConstraints : undefined,
           }
         }
       }
@@ -504,12 +518,13 @@ function getDefaultTypeForDynamicRef(rootSchema: NormalizedJSONSchema, anchorNam
  * This is the main entry point that returns both AST and parseContext
  */
 /**
- * Extract type names from a union item, handling nested allOf patterns
+ * Extract type names and constraints from a union item, handling nested allOf patterns
  */
-function extractTypeNamesFromUnionItem(item: any): string[] {
+function extractTypeNamesFromUnionItem(item: any): {names: string[]; constraints: Map<string, any>} {
   const names: string[] = []
+  const constraints = new Map<string, any>()
 
-  // Direct $ref
+  // Direct $ref (no constraints)
   if (item.$ref) {
     const refName = item.$ref.split('/').pop()
     if (refName) {
@@ -519,17 +534,33 @@ function extractTypeNamesFromUnionItem(item: any): string[] {
 
   // Nested allOf pattern (e.g., for property constraints)
   if (item.allOf && Array.isArray(item.allOf)) {
-    for (const allOfMember of item.allOf) {
-      if (allOfMember.$ref) {
-        const refName = allOfMember.$ref.split('/').pop()
-        if (refName) {
-          names.push(toSafeString(refName))
+    // Find the base $ref
+    const baseRef = item.allOf.find((member: any) => member.$ref)
+    if (baseRef) {
+      const refName = baseRef.$ref.split('/').pop()
+      if (refName) {
+        const typeName = toSafeString(refName)
+        names.push(typeName)
+
+        // Collect constraint schemas (everything that's not a $ref)
+        const constraintSchemas = item.allOf.filter((member: any) => !member.$ref && member.properties)
+        if (constraintSchemas.length > 0) {
+          // Merge all constraint schemas into one
+          const mergedConstraints = {
+            properties: {},
+          }
+          for (const constraintSchema of constraintSchemas) {
+            if (constraintSchema.properties) {
+              Object.assign(mergedConstraints.properties, constraintSchema.properties)
+            }
+          }
+          constraints.set(typeName, mergedConstraints)
         }
       }
     }
   }
 
-  return names
+  return {names, constraints}
 }
 
 /**
@@ -546,18 +577,27 @@ export function collectAnchorContexts(schema: any): Map<string, AnchorContext> {
     if (obj.$dynamicAnchor && (obj.oneOf || obj.anyOf)) {
       const union = obj.oneOf || obj.anyOf
       const allowedTypeNames: string[] = []
+      const allConstraints = new Map<string, any>()
 
       for (const item of union) {
-        const names = extractTypeNamesFromUnionItem(item)
+        const {names, constraints} = extractTypeNamesFromUnionItem(item)
         allowedTypeNames.push(...names)
+        // Merge constraints
+        for (const [typeName, constraint] of constraints.entries()) {
+          allConstraints.set(typeName, constraint)
+        }
       }
 
       if (allowedTypeNames.length > 0) {
         anchorContexts.set(obj.$dynamicAnchor, {
           anchorName: obj.$dynamicAnchor,
           allowedTypeNames,
+          typeConstraints: allConstraints.size > 0 ? allConstraints : undefined,
         })
         log('blue', 'parser', `Collected anchor context: ${obj.$dynamicAnchor} -> [${allowedTypeNames.join(', ')}]`)
+        if (allConstraints.size > 0) {
+          log('blue', 'parser', `  With constraints for: [${Array.from(allConstraints.keys()).join(', ')}]`)
+        }
       }
     }
 
@@ -1275,11 +1315,14 @@ function parseNonLiteral(
         // Build the union of allowed types from the effective anchor
         // These are the actual node types like ParagraphNode, TextNode, etc.
         const allowedTypeRefs: AST[] = effectiveAnchor.allowedTypeNames.map(typeName => {
+          // Build the base type reference
+          let baseRef: AST
+
           // Check if this type is a generic interface
           if (parseContext.genericInterfaces.has(typeName)) {
             // Instantiate it with the type alias (for recursion)
             log('blue', 'parser', `  Allowed type ${typeName} is generic, instantiating with ${typeAliasName}`)
-            return {
+            baseRef = {
               params: typeName,
               type: 'REFERENCE' as const,
               typeArguments: [
@@ -1291,11 +1334,52 @@ function parseNonLiteral(
             }
           } else {
             log('blue', 'parser', `  Allowed type ${typeName} is not generic, plain reference`)
-            return {
+            baseRef = {
               params: typeName,
               type: 'REFERENCE' as const,
             }
           }
+
+          // Check if there are constraints for this type from allOf patterns
+          const constraintSchema = effectiveAnchor.typeConstraints?.get(typeName)
+          if (constraintSchema && constraintSchema.properties) {
+            log('blue', 'parser', `  Type ${typeName} has constraints, creating intersection`)
+
+            // Build an interface AST directly from the constraint properties
+            const constraintParams: TInterfaceParam[] = []
+            for (const [propName, propSchema] of Object.entries(constraintSchema.properties)) {
+              const propAST = parse(
+                propSchema as NormalizedJSONSchema,
+                options,
+                propName,
+                new Map(),
+                new Set(),
+                undefined,
+                parseContext,
+              )
+              constraintParams.push({
+                ast: propAST,
+                isPatternProperty: false,
+                isRequired: false,
+                isUnreachableDefinition: false,
+                keyName: propName,
+              })
+            }
+
+            const constraintAST: TInterface = {
+              type: 'INTERFACE' as const,
+              params: constraintParams,
+              superTypes: [],
+            }
+
+            // Return intersection of base type and constraints
+            return {
+              type: 'INTERSECTION' as const,
+              params: [baseRef, constraintAST],
+            }
+          }
+
+          return baseRef
         })
 
         const unionAST = {
@@ -1320,7 +1404,17 @@ function parseNonLiteral(
 
         const hasGenericMembers = anyOfParams.some((p: AST) => hasGenericInterface(p))
 
-        log('blue', 'parser', `  hasGenericMembers=${hasGenericMembers}, anyOfParams count=${anyOfParams.length}`)
+        // Also check if the allowed types include generic interfaces
+        // This handles the case where generic interfaces are in the field-level oneOf, not in anyOf params
+        const hasGenericAllowedTypes = effectiveAnchor.allowedTypeNames.some(typeName =>
+          parseContext.genericInterfaces.has(typeName),
+        )
+
+        log(
+          'blue',
+          'parser',
+          `  hasGenericMembers=${hasGenericMembers}, hasGenericAllowedTypes=${hasGenericAllowedTypes}, anyOfParams count=${anyOfParams.length}`,
+        )
         anyOfParams.forEach((p: AST, idx: number) => {
           log('blue', 'parser', `    param ${idx}: type=${p.type}`)
           if (p.type === 'INTERSECTION' && Array.isArray((p as any).params)) {
@@ -1334,7 +1428,7 @@ function parseNonLiteral(
           }
         })
 
-        if (hasGenericMembers && !parseContext.typeAliases.has(typeAliasName)) {
+        if ((hasGenericMembers || hasGenericAllowedTypes) && !parseContext.typeAliases.has(typeAliasName)) {
           log('blue', 'parser', `Creating field-level recursive type alias: ${typeAliasName}`)
           log('blue', 'parser', `  Union has ${allowedTypeRefs.length} types`)
           allowedTypeRefs.forEach((ref, idx) => {
