@@ -725,6 +725,56 @@ function genericizeInterfaces(parseContext: ParseContext, options: Options): voi
       log('blue', 'parser', `  Updated stored interface ${interfaceName}: ${oldParamName} -> T`)
     }
   }
+
+  // Phase 1: Make ALL generic interfaces actually use their type parameter
+  // This includes both interfaces being genericized and interfaces already marked as generic
+  log('blue', 'parser', `Updating generic interface bodies to use type parameters`)
+
+  for (const [interfaceName, interfaceAST] of parseContext.genericInterfaceASTs.entries()) {
+    if (interfaceAST.typeParameters && interfaceAST.typeParameters.length > 0) {
+      const typeParamName = interfaceAST.typeParameters[0].name
+      log('blue', 'parser', `  Updating ${interfaceName} body to use ${typeParamName} in children`)
+
+      // Helper to recursively find and update children arrays
+      function updateChildrenToUseTypeParam(ast: AST): AST {
+        // If this is an array with unknown/any items, replace with type parameter
+        if (ast.type === 'ARRAY') {
+          const arrayAST = ast as any
+          if (arrayAST.params && (arrayAST.params.type === 'UNKNOWN' || arrayAST.params.type === 'ANY')) {
+            log('blue', 'parser', `    Found array with ${arrayAST.params.type}, replacing with ${typeParamName}`)
+            return {
+              ...ast,
+              params: {
+                type: 'REFERENCE' as const,
+                params: typeParamName,
+              },
+            }
+          }
+        }
+
+        // Recursively process INTERFACE params
+        if (ast.type === 'INTERFACE' && Array.isArray((ast as any).params)) {
+          return {
+            ...ast,
+            params: (ast as any).params.map((param: TInterfaceParam) => ({
+              ...param,
+              ast: updateChildrenToUseTypeParam(param.ast),
+            })),
+          }
+        }
+
+        return ast
+      }
+
+      // Update all interface parameters
+      interfaceAST.params = interfaceAST.params.map(param => ({
+        ...param,
+        ast: updateChildrenToUseTypeParam(param.ast),
+      }))
+
+      log('blue', 'parser', `  Updated ${interfaceName} to use ${typeParamName} in children arrays`)
+    }
+  }
 }
 
 export function parseWithContext(
