@@ -1054,20 +1054,48 @@ function parseNonLiteral(
       if (schema.allOf!.length === 2) {
         // Helper to check if a member is a base (has empty items or is a $ref to a generic interface)
         const isBaseMember = (m: any): boolean => {
+          // First check: does the schema itself have empty items?
           if (hasEmptyItemsSchema(m as NormalizedJSONSchema)) {
             return true
           }
-          // Check if it's a $ref to a generic interface
-          if (m.$ref) {
-            const refMatch = m.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)
-            if (refMatch && parseContext?.genericInterfaces.has(toSafeString(refMatch[1]))) {
-              return true
+
+          // Second check: if it has $id, recursively check its properties for empty items
+          // This handles dereferenced schemas that haven't been marked as generic yet
+          if (m.$id && m.properties) {
+            for (const propValue of Object.values(m.properties as any)) {
+              if (propValue && typeof propValue === 'object' && (propValue as any).properties) {
+                if (hasEmptyItemsSchema(propValue as NormalizedJSONSchema)) {
+                  return true
+                }
+              }
             }
           }
-          // Check if it's a dereferenced schema with $id matching a generic interface
+
+          // Third check: is it a $ref to a generic interface?
+          if (m.$ref) {
+            const refMatch = m.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)
+            if (refMatch) {
+              const refName = toSafeString(refMatch[1])
+
+              // Check if already marked as generic
+              if (parseContext?.genericInterfaces.has(refName)) {
+                return true
+              }
+              // Also check if the referenced schema HAS empty items (will become generic)
+              const definitions = getDefinitionsMemoized(getRootSchema(schema))
+              const refSchema = definitions[refMatch[1]]
+
+              if (refSchema && hasEmptyItemsSchema(refSchema as NormalizedJSONSchema)) {
+                return true
+              }
+            }
+          }
+
+          // Fourth check: dereferenced schema with $id already marked as generic
           if (m.$id && parseContext?.genericInterfaces.has(toSafeString(m.$id))) {
             return true
           }
+
           return false
         }
 
@@ -1108,18 +1136,24 @@ function parseNonLiteral(
             baseAST.standaloneName ||
             (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
 
-          log(
-            'blue',
-            'parser',
-            `Pattern 2: interfaceName=${interfaceName}, isGeneric=${parseContext?.genericInterfaces.has(interfaceName as string)}`,
-          )
+          // Check if this is a generic interface (already marked OR has empty items)
+          // For $ref members, need to look up the actual schema in definitions
+          let actualBaseSchema = baseMemberSchema
+          if (baseMemberKeyFromRef) {
+            const definitions = getDefinitionsMemoized(getRootSchema(schema))
+            actualBaseSchema = (definitions[baseMemberKeyFromRef] || baseMemberSchema) as NormalizedJSONSchema
+          }
 
-          // Check if this is a generic interface (has empty items)
-          if (
+          const baseMemberHasEmptyItems = hasEmptyItemsSchema(actualBaseSchema as NormalizedJSONSchema)
+          const isGenericInterface =
             interfaceName &&
             typeof interfaceName === 'string' &&
-            parseContext?.genericInterfaces.has(interfaceName)
-          ) {
+            (parseContext?.genericInterfaces.has(interfaceName) || baseMemberHasEmptyItems)
+
+          log('blue', 'parser', `Pattern 2: interfaceName=${interfaceName}, isGeneric=${isGenericInterface}`)
+
+          // Check if this is a generic interface (has empty items)
+          if (isGenericInterface) {
             // Look for the property override that provides the concrete type
             // Note: Don't pass anchorContext here - it will cause nested types to use self-references
             // The anchor context will be applied later when we create the type alias
@@ -1161,16 +1195,18 @@ function parseNonLiteral(
 
               // Check if we should use a type alias
               let typeAliasName: string | undefined
+              let useTypeAlias = false
 
               // First priority: use currentTypeAliasName if set (from anyOf handler)
               if (parseContext?.currentTypeAliasName) {
                 typeAliasName = parseContext.currentTypeAliasName
+                useTypeAlias = true // Always use type alias from anyOf, regardless of recursion
                 log('blue', 'parser', `Pattern 2: Using currentTypeAliasName from context: ${typeAliasName}`)
               } else if (isRecursiveUnion && keyName && parentName) {
                 // Second priority: create our own type alias if we have keyName
                 typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
 
-                if (!parseContext.typeAliases.has(typeAliasName)) {
+                if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
                   log('blue', 'parser', `Creating recursive type alias for allOf pattern: ${typeAliasName}`)
 
                   const typeAlias: TTypeAlias = {
@@ -1182,9 +1218,10 @@ function parseNonLiteral(
 
                   parseContext.typeAliases.set(typeAliasName, typeAlias)
                 }
+                useTypeAlias = true
               }
 
-              if (typeAliasName && isRecursiveUnion) {
+              if (typeAliasName && useTypeAlias) {
                 // Use reference to the type alias instead of the raw union
                 finalTypeArg = {
                   type: 'REFERENCE',
@@ -1508,8 +1545,14 @@ function parseNonLiteral(
           }
         })
 
-        if ((hasGenericMembers || hasGenericAllowedTypes) && !parseContext.typeAliases.has(typeAliasName)) {
-          log('blue', 'parser', `Creating field-level recursive type alias: ${typeAliasName}`)
+        // Create type alias if:
+        // 1. It's recursive (hasGenericMembers or hasGenericAllowedTypes), OR
+        // 2. There's a nested anchor (enables clean output for non-recursive cases too)
+        if (
+          (hasGenericMembers || hasGenericAllowedTypes || effectiveAnchor) &&
+          !parseContext.typeAliases.has(typeAliasName)
+        ) {
+          log('blue', 'parser', `Creating field-level type alias: ${typeAliasName}`)
           log('blue', 'parser', `  Union has ${allowedTypeRefs.length} types`)
           allowedTypeRefs.forEach((ref, idx) => {
             log(
@@ -1523,7 +1566,7 @@ function parseNonLiteral(
             type: 'TYPE_ALIAS',
             standaloneName: typeAliasName,
             params: unionAST,
-            comment: `Recursive type alias for ${parseContext.currentInterfaceName}.${keyName}`,
+            comment: `Type alias for ${parseContext.currentInterfaceName}.${keyName}`,
           }
 
           parseContext.typeAliases.set(typeAliasName, typeAlias)
