@@ -376,8 +376,9 @@ function extractTypeArgumentFromOverride(
     for (const prop of Object.values(props)) {
       if (prop && typeof prop === 'object') {
         const propSchema = prop as NormalizedJSONSchema
-        // Look for array with items
-        if (propSchema.type === 'array' && propSchema.items) {
+        // Look for array with items (either explicit type: "array" or just has items property)
+        const isArray = propSchema.type === 'array' || (propSchema.items && !propSchema.properties)
+        if (isArray && propSchema.items) {
           const items = propSchema.items
           if (!Array.isArray(items) && typeof items === 'object') {
             // Check if items has concrete type (oneOf, anyOf, type, $ref, $dynamicAnchor)
