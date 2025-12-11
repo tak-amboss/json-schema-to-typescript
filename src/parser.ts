@@ -205,6 +205,12 @@ function hasEmptyItemsSchema(schema: NormalizedJSONSchema): boolean {
             }
           }
         }
+        // Also recursively check nested properties
+        if (propSchema.properties) {
+          if (hasEmptyItemsSchema(propSchema)) {
+            return true
+          }
+        }
       }
     }
   }
@@ -1129,11 +1135,13 @@ function parseNonLiteral(
           const baseMemberDefinitions = getDefinitionsMemoized(getRootSchema(baseMemberSchema))
           const baseMemberKeyFromDef = findKey(baseMemberDefinitions, _ => _ === baseMemberSchema)
 
+          // Use baseAST.standaloneName first since that's the ACTUAL generated name
+          // (it considers title, $id, and other factors via standaloneName())
           const interfaceName =
+            baseAST.standaloneName ||
             (baseMemberSchema.$id ? toSafeString(baseMemberSchema.$id) : null) ||
             (baseMemberKeyFromRef ? toSafeString(baseMemberKeyFromRef) : null) ||
             (baseMemberKeyFromDef ? toSafeString(baseMemberKeyFromDef) : null) ||
-            baseAST.standaloneName ||
             (baseAST.type === 'REFERENCE' && baseAST.params ? baseAST.params : null)
 
           // Check if this is a generic interface (already marked OR has empty items)
