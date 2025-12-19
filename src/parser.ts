@@ -1259,16 +1259,28 @@ function parseNonLiteral(
                     'parser',
                     `Pattern 2: REUSING existing type alias for anchor ${anchorName}: ${typeAliasName}`,
                   )
-                } else if (parentName) {
-                  // Third priority: create our own type alias if we have keyName AND parentName
-                  // If there's an anchor, use anchor-based naming for better semantics
-                  if (anchorName) {
-                    // Use anchor name for the type alias (e.g., "sharedTypes" -> "SharedTypes")
-                    typeAliasName = toSafeString(anchorName.charAt(0).toUpperCase() + anchorName.slice(1))
-                  } else {
-                    // Fall back to field-based naming
-                    typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
+                } else if (anchorName) {
+                  // Third priority: create type alias using anchor name (works even without parentName!)
+                  typeAliasName = toSafeString(anchorName.charAt(0).toUpperCase() + anchorName.slice(1))
+
+                  if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
+                    log('blue', 'parser', `Creating recursive type alias for anchor ${anchorName}: ${typeAliasName}`)
+
+                    const typeAlias: TTypeAlias = {
+                      type: 'TYPE_ALIAS',
+                      standaloneName: typeAliasName,
+                      params: typeArg,
+                      comment: `Recursive type alias for $dynamicAnchor "${anchorName}"`,
+                    }
+
+                    parseContext.typeAliases.set(typeAliasName, typeAlias)
+                    parseContext.anchorToAliasMap.set(anchorName, typeAliasName)
+                    log('blue', 'parser', `Registered anchor ${anchorName} -> type alias ${typeAliasName}`)
                   }
+                  useTypeAlias = true
+                } else if (parentName) {
+                  // Fourth priority: create field-based type alias (requires parentName)
+                  typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
 
                   if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
                     log('blue', 'parser', `Creating recursive type alias for allOf pattern: ${typeAliasName}`)
@@ -1277,18 +1289,10 @@ function parseNonLiteral(
                       type: 'TYPE_ALIAS',
                       standaloneName: typeAliasName,
                       params: typeArg,
-                      comment: anchorName
-                        ? `Recursive type alias for $dynamicAnchor "${anchorName}"`
-                        : `Recursive type for ${parentName}.${keyName}`,
+                      comment: `Recursive type for ${parentName}.${keyName}`,
                     }
 
                     parseContext.typeAliases.set(typeAliasName, typeAlias)
-
-                    // Register this anchor -> alias mapping for future reuse
-                    if (anchorName) {
-                      parseContext.anchorToAliasMap.set(anchorName, typeAliasName)
-                      log('blue', 'parser', `Registered anchor ${anchorName} -> type alias ${typeAliasName}`)
-                    }
                   }
                   useTypeAlias = true
                 }
