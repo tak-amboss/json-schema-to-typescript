@@ -205,7 +205,7 @@ export function toSafeString(string: string) {
   )
 }
 
-export function generateName(from: string, usedNames: Set<string>) {
+export function generateName(from: string, usedNames: Set<string>): string {
   let name = toSafeString(from)
   if (!name) {
     name = 'NoName'
