@@ -1243,10 +1243,10 @@ function parseNonLiteral(
                 typeAliasName = parseContext.currentTypeAliasName
                 useTypeAlias = true // Always use type alias from anyOf, regardless of recursion
                 log('blue', 'parser', `Pattern 2: Using currentTypeAliasName from context: ${typeAliasName}`)
-              } else if (isRecursiveUnion && keyName) {
+              } else if (isRecursiveUnion) {
                 // Second priority: check if there's an anchor in the override and reuse its type alias
                 // This enables type alias reuse across different fields with the same anchor
-                // This works even for inline objects that don't have a parentName!
+                // Works even without keyName (e.g., allOf inside anyOf)!
                 const anchorName = extractAnchorNameFromOverride(overrideMember)
                 const existingAliasForAnchor = anchorName ? parseContext?.anchorToAliasMap.get(anchorName) : undefined
 
@@ -1259,8 +1259,8 @@ function parseNonLiteral(
                     'parser',
                     `Pattern 2: REUSING existing type alias for anchor ${anchorName}: ${typeAliasName}`,
                   )
-                } else if (anchorName) {
-                  // Third priority: create type alias using anchor name (works even without parentName!)
+                } else if (anchorName && keyName) {
+                  // Third priority: create type alias using anchor name (needs keyName for naming)
                   typeAliasName = toSafeString(anchorName.charAt(0).toUpperCase() + anchorName.slice(1))
 
                   if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
@@ -1278,8 +1278,8 @@ function parseNonLiteral(
                     log('blue', 'parser', `Registered anchor ${anchorName} -> type alias ${typeAliasName}`)
                   }
                   useTypeAlias = true
-                } else if (parentName) {
-                  // Fourth priority: create field-based type alias (requires parentName)
+                } else if (parentName && keyName) {
+                  // Fourth priority: create field-based type alias (requires parentName AND keyName)
                   typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
 
                   if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
