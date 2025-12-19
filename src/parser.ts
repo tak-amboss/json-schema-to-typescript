@@ -1243,9 +1243,10 @@ function parseNonLiteral(
                 typeAliasName = parseContext.currentTypeAliasName
                 useTypeAlias = true // Always use type alias from anyOf, regardless of recursion
                 log('blue', 'parser', `Pattern 2: Using currentTypeAliasName from context: ${typeAliasName}`)
-              } else if (isRecursiveUnion && keyName && parentName) {
+              } else if (isRecursiveUnion && keyName) {
                 // Second priority: check if there's an anchor in the override and reuse its type alias
                 // This enables type alias reuse across different fields with the same anchor
+                // This works even for inline objects that don't have a parentName!
                 const anchorName = extractAnchorNameFromOverride(overrideMember)
                 const existingAliasForAnchor = anchorName ? parseContext?.anchorToAliasMap.get(anchorName) : undefined
 
@@ -1258,8 +1259,8 @@ function parseNonLiteral(
                     'parser',
                     `Pattern 2: REUSING existing type alias for anchor ${anchorName}: ${typeAliasName}`,
                   )
-                } else {
-                  // Third priority: create our own type alias if we have keyName
+                } else if (parentName) {
+                  // Third priority: create our own type alias if we have keyName AND parentName
                   // If there's an anchor, use anchor-based naming for better semantics
                   if (anchorName) {
                     // Use anchor name for the type alias (e.g., "sharedTypes" -> "SharedTypes")
