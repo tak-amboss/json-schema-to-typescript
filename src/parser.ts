@@ -1259,8 +1259,8 @@ function parseNonLiteral(
                     'parser',
                     `Pattern 2: REUSING existing type alias for anchor ${anchorName}: ${typeAliasName}`,
                   )
-                } else if (anchorName && keyName) {
-                  // Third priority: create type alias using anchor name (needs keyName for naming)
+                } else if (anchorName) {
+                  // Third priority: create type alias using anchor name (no keyName needed!)
                   typeAliasName = toSafeString(anchorName.charAt(0).toUpperCase() + anchorName.slice(1))
 
                   if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
@@ -1289,7 +1289,7 @@ function parseNonLiteral(
                       type: 'TYPE_ALIAS',
                       standaloneName: typeAliasName,
                       params: typeArg,
-                      comment: `Recursive type for ${parentName}.${keyName}`,
+                      comment: `Recursive type alias for ${parentName}.${keyName}`,
                     }
 
                     parseContext.typeAliases.set(typeAliasName, typeAlias)
@@ -1657,7 +1657,7 @@ function parseNonLiteral(
             type: 'TYPE_ALIAS',
             standaloneName: typeAliasName,
             params: unionAST,
-            comment: `Type alias for ${parseContext.currentInterfaceName}.${keyName}`,
+            comment: `Recursive type alias for ${parseContext.currentInterfaceName}.${keyName}`,
           }
 
           parseContext.typeAliases.set(typeAliasName, typeAlias)
@@ -2344,7 +2344,7 @@ function parseSchema(
           type: 'TYPE_ALIAS',
           standaloneName: typeAliasName,
           params: ast,
-          comment: `Recursive type for ${parentSchemaName}.${key}`,
+          comment: `Recursive type alias for ${parentSchemaName}.${key}`,
         }
 
         parseContext.typeAliases.set(typeAliasName, typeAlias)
