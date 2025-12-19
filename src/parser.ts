@@ -1243,10 +1243,10 @@ function parseNonLiteral(
                 typeAliasName = parseContext.currentTypeAliasName
                 useTypeAlias = true // Always use type alias from anyOf, regardless of recursion
                 log('blue', 'parser', `Pattern 2: Using currentTypeAliasName from context: ${typeAliasName}`)
-              } else if (isRecursiveUnion) {
-                // Second priority: check if there's an anchor in the override and reuse its type alias
+              } else {
+                // Second priority: check if there's an anchor in the override
                 // This enables type alias reuse across different fields with the same anchor
-                // Works even without keyName (e.g., allOf inside anyOf)!
+                // Works for both recursive AND non-recursive unions!
                 const anchorName = extractAnchorNameFromOverride(overrideMember)
                 const existingAliasForAnchor = anchorName ? parseContext?.anchorToAliasMap.get(anchorName) : undefined
 
@@ -1260,17 +1260,23 @@ function parseNonLiteral(
                     `Pattern 2: REUSING existing type alias for anchor ${anchorName}: ${typeAliasName}`,
                   )
                 } else if (anchorName) {
-                  // Third priority: create type alias using anchor name (no keyName needed!)
+                  // Third priority: create type alias using anchor name
+                  // Works for both recursive and non-recursive unions with $dynamicAnchor!
                   typeAliasName = toSafeString(anchorName.charAt(0).toUpperCase() + anchorName.slice(1))
 
                   if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
-                    log('blue', 'parser', `Creating recursive type alias for anchor ${anchorName}: ${typeAliasName}`)
+                    const commentPrefix = isRecursiveUnion ? 'Recursive type alias' : 'Type alias'
+                    log(
+                      'blue',
+                      'parser',
+                      `Creating ${commentPrefix.toLowerCase()} for $dynamicAnchor "${anchorName}": ${typeAliasName}`,
+                    )
 
                     const typeAlias: TTypeAlias = {
                       type: 'TYPE_ALIAS',
                       standaloneName: typeAliasName,
                       params: typeArg,
-                      comment: `Recursive type alias for $dynamicAnchor "${anchorName}"`,
+                      comment: `${commentPrefix} for $dynamicAnchor "${anchorName}"`,
                     }
 
                     parseContext.typeAliases.set(typeAliasName, typeAlias)
@@ -1278,8 +1284,9 @@ function parseNonLiteral(
                     log('blue', 'parser', `Registered anchor ${anchorName} -> type alias ${typeAliasName}`)
                   }
                   useTypeAlias = true
-                } else if (parentName && keyName) {
-                  // Fourth priority: create field-based type alias (requires parentName AND keyName)
+                } else if (isRecursiveUnion && parentName && keyName) {
+                  // Fourth priority: create field-based type alias ONLY for recursive unions
+                  // (requires parentName AND keyName, and must be recursive)
                   typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
 
                   if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
