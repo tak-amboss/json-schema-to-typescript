@@ -54,6 +54,9 @@ export interface ParseContext {
   anchorContexts: Map<string, AnchorContext>
   // Current type alias being generated (for nested patterns to reference)
   currentTypeAliasName?: string
+  // Maps $dynamicAnchor names to their generated type alias names
+  // This ensures the same anchor always uses the same type alias across the schema
+  anchorToAliasMap: Map<string, string>
 }
 
 export interface ParseResult {
@@ -215,6 +218,34 @@ function hasEmptyItemsSchema(schema: NormalizedJSONSchema): boolean {
     }
   }
   return false
+}
+
+/**
+ * Extract $dynamicAnchor name from an allOf override member
+ * Returns the anchor name if found, undefined otherwise
+ */
+function extractAnchorNameFromOverride(overrideMember: any): string | undefined {
+  if (!overrideMember || !overrideMember.properties) {
+    return undefined
+  }
+
+  // Look through properties for one with a $dynamicAnchor in its items
+  for (const prop of Object.values(overrideMember.properties)) {
+    if (prop && typeof prop === 'object') {
+      const propSchema = prop as any
+      // Check if it has items with $dynamicAnchor
+      if (propSchema.items && propSchema.items.$dynamicAnchor) {
+        return propSchema.items.$dynamicAnchor
+      }
+      // Also check nested properties recursively
+      if (propSchema.properties) {
+        const nested = extractAnchorNameFromOverride(propSchema)
+        if (nested) return nested
+      }
+    }
+  }
+
+  return undefined
 }
 
 /**
@@ -796,6 +827,7 @@ export function parseWithContext(
     genericInterfaceASTs: new Map<string, TInterface>(),
     typeAliases: new Map<string, TTypeAlias>(),
     anchorContexts: preCollectedAnchorContexts || new Map<string, AnchorContext>(),
+    anchorToAliasMap: new Map<string, string>(),
   }
 
   // Pre-scan the schema to identify all interfaces that need type parameters
@@ -832,6 +864,7 @@ export function parse(
       genericInterfaceASTs: new Map<string, TInterface>(),
       typeAliases: new Map<string, TTypeAlias>(),
       anchorContexts: new Map<string, AnchorContext>(),
+      anchorToAliasMap: new Map<string, string>(),
     }
     // Don't pre-scan for backward compatibility - just create empty context
   }
@@ -1211,22 +1244,53 @@ function parseNonLiteral(
                 useTypeAlias = true // Always use type alias from anyOf, regardless of recursion
                 log('blue', 'parser', `Pattern 2: Using currentTypeAliasName from context: ${typeAliasName}`)
               } else if (isRecursiveUnion && keyName && parentName) {
-                // Second priority: create our own type alias if we have keyName
-                typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
+                // Second priority: check if there's an anchor in the override and reuse its type alias
+                // This enables type alias reuse across different fields with the same anchor
+                const anchorName = extractAnchorNameFromOverride(overrideMember)
+                const existingAliasForAnchor = anchorName ? parseContext?.anchorToAliasMap.get(anchorName) : undefined
 
-                if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
-                  log('blue', 'parser', `Creating recursive type alias for allOf pattern: ${typeAliasName}`)
-
-                  const typeAlias: TTypeAlias = {
-                    type: 'TYPE_ALIAS',
-                    standaloneName: typeAliasName,
-                    params: typeArg,
-                    comment: `Recursive type for ${parentName}.${keyName}`,
+                if (existingAliasForAnchor) {
+                  // Reuse the existing type alias for this anchor
+                  typeAliasName = existingAliasForAnchor
+                  useTypeAlias = true
+                  log(
+                    'blue',
+                    'parser',
+                    `Pattern 2: REUSING existing type alias for anchor ${anchorName}: ${typeAliasName}`,
+                  )
+                } else {
+                  // Third priority: create our own type alias if we have keyName
+                  // If there's an anchor, use anchor-based naming for better semantics
+                  if (anchorName) {
+                    // Use anchor name for the type alias (e.g., "sharedTypes" -> "SharedTypes")
+                    typeAliasName = toSafeString(anchorName.charAt(0).toUpperCase() + anchorName.slice(1))
+                  } else {
+                    // Fall back to field-based naming
+                    typeAliasName = parentName + toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1))
                   }
 
-                  parseContext.typeAliases.set(typeAliasName, typeAlias)
+                  if (parseContext && !parseContext.typeAliases.has(typeAliasName)) {
+                    log('blue', 'parser', `Creating recursive type alias for allOf pattern: ${typeAliasName}`)
+
+                    const typeAlias: TTypeAlias = {
+                      type: 'TYPE_ALIAS',
+                      standaloneName: typeAliasName,
+                      params: typeArg,
+                      comment: anchorName
+                        ? `Recursive type alias for $dynamicAnchor "${anchorName}"`
+                        : `Recursive type for ${parentName}.${keyName}`,
+                    }
+
+                    parseContext.typeAliases.set(typeAliasName, typeAlias)
+
+                    // Register this anchor -> alias mapping for future reuse
+                    if (anchorName) {
+                      parseContext.anchorToAliasMap.set(anchorName, typeAliasName)
+                      log('blue', 'parser', `Registered anchor ${anchorName} -> type alias ${typeAliasName}`)
+                    }
+                  }
+                  useTypeAlias = true
                 }
-                useTypeAlias = true
               }
 
               if (typeAliasName && useTypeAlias) {
@@ -1311,18 +1375,32 @@ function parseNonLiteral(
       )
 
       if (nestedAnchor && keyName && parseContext?.currentInterfaceName) {
-        // Generate type alias for this field's recursive union
-        // The alias represents the allowed children types for this field
-        const typeAliasName =
-          parseContext.currentInterfaceName +
-          toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1)) +
-          'Children'
+        // Check if this anchor already has a type alias (for reuse across schema)
+        let typeAliasName: string = parseContext.anchorToAliasMap.get(nestedAnchor.anchorName) || ''
 
-        log(
-          'blue',
-          'parser',
-          `Found nested $dynamicAnchor in anyOf for field ${keyName}, anchor=${nestedAnchor.anchorName}, will create type alias: ${typeAliasName}`,
-        )
+        if (typeAliasName) {
+          log(
+            'blue',
+            'parser',
+            `Found nested $dynamicAnchor in anyOf for field ${keyName}, anchor=${nestedAnchor.anchorName}, REUSING existing type alias: ${typeAliasName}`,
+          )
+        } else {
+          // Generate type alias for this field's recursive union
+          // The alias represents the allowed children types for this field
+          typeAliasName =
+            parseContext.currentInterfaceName +
+            toSafeString(keyName.charAt(0).toUpperCase() + keyName.slice(1)) +
+            'Children'
+
+          // Register this anchor -> alias mapping for future reuse
+          parseContext.anchorToAliasMap.set(nestedAnchor.anchorName, typeAliasName)
+
+          log(
+            'blue',
+            'parser',
+            `Found nested $dynamicAnchor in anyOf for field ${keyName}, anchor=${nestedAnchor.anchorName}, CREATING new type alias: ${typeAliasName}`,
+          )
+        }
 
         // Get the allowed types from the pre-scanned anchor contexts
         const preScannedAnchor = parseContext.anchorContexts.get(nestedAnchor.anchorName)
